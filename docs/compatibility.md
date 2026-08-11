@@ -55,13 +55,23 @@ project engine for Shadowsocks 2022 and the remaining supported nodes.
 Panel settings that cannot be represented exactly are rejected
 with a clear error and are never silently approximated.
 
-TLS certificate files are operator-managed in this beta. When the panel omits
-`cert_file` and `key_file`, the controller uses the conventional original
-paths `/etc/v3node/<protocol><node-id>.cer` and `.key`; both files must already
-exist and be readable by the `v3node` service account. Panel certificate modes
-`dns`, `http`, and `self` are rejected explicitly because this controller does
-not ingest DNS-provider secrets or run an unaudited ACME lifecycle. Reality
-does not use these certificate files.
+TLS `file` certificates are operator-managed. When the panel omits `cert_file`
+and `key_file`, the controller uses `/etc/v3node/<protocol><node-id>.cer` and
+`.key`; both files must already exist and be readable by the `v3node` service
+account. `cert_mode=self` creates a private ECDSA pair below
+`/var/lib/v3node/certificates` as a bounded reconciliation step. `dns` and
+`http` remain explicitly rejected because this controller does not ingest
+DNS-provider secrets or keep an ACME client resident. `tls=1` with an empty or
+`none` certificate mode means external TLS termination, matching the original
+panel contract. Reality does not use certificate files.
+
+Panel custom outbound actions `route`, `route_ip`, and `default_out` select
+Xray. Their JSON is capped at 256 KiB, accepts only reviewed outbound fields,
+rejects protected/invalid tags and rejects conflicting duplicate definitions.
+The sing-box adapter fails closed for these Xray-specific actions.
+
+Both renderers intercept inbound client UDP/53 and route it through the
+engine's configured DNS stack, matching the original node's resolver behavior.
 
 “Beta” means rendering has fixture coverage and representative configurations
 have passed the pinned engine's configuration check. It is not a production
@@ -85,3 +95,7 @@ not an admission-time guarantee, and multiple devices behind one NAT appear as
 one IP. Stock Xray has no equivalent source-IP/user hook, so an Xray generation
 containing a non-zero `device_limit` also fails validation. These are explicit
 compatibility boundaries, not claims that unsupported limits were applied.
+
+This beta manages one panel/node per controller process. The original
+multi-node array contract is not yet implemented; operators must not point two
+service instances at the same state directory or management ports.

@@ -79,6 +79,53 @@ func TestSelect(t *testing.T) {
 	}
 }
 
+func TestSelectPreservesXrayOnlyTransportAndRealitySettings(t *testing.T) {
+	node := baseNode()
+	node.TLS.ServerNames = []string{"one.example", "two.example"}
+	renderer, err := Select("auto", node)
+	if err != nil || renderer.Name() != "xray" {
+		t.Fatalf("multi-SNI Reality renderer=%v err=%v", renderer, err)
+	}
+	if _, err := Select("sing-box", node); err == nil {
+		t.Fatal("forced sing-box accepted multi-SNI Reality")
+	}
+
+	for _, test := range []struct {
+		transport string
+		settings  string
+	}{
+		{transport: "ws", settings: `{"path":"/vpn","host":"edge.example"}`},
+		{transport: "grpc", settings: `{"serviceName":"vpn","multiMode":true}`},
+		{transport: "grpc", settings: `{"serviceName":"vpn","authority":"edge.example"}`},
+		{transport: "httpupgrade", settings: `{"path":"/vpn?ed=2048"}`},
+	} {
+		node = NodeSpec{Protocol: "vless", Port: 443, Transport: test.transport, TransportSettings: json.RawMessage(test.settings)}
+		renderer, err = Select("auto", node)
+		if err != nil || renderer.Name() != "xray" {
+			t.Fatalf("%s settings %s renderer=%v err=%v", test.transport, test.settings, renderer, err)
+		}
+	}
+
+	node = NodeSpec{
+		Protocol: "shadowsocks", Port: 443, Transport: "tcp", Cipher: "2022-blake3-aes-128-gcm", ServerKey: "server-key",
+		TransportSettings: json.RawMessage(`{"path":"/obfs","Host":"edge.example"}`),
+	}
+	renderer, err = Select("auto", node)
+	if err != nil || renderer.Name() != "xray" {
+		t.Fatalf("Shadowsocks HTTP obfuscation renderer=%v err=%v", renderer, err)
+	}
+}
+
+func TestSingBoxConvertsWebSocketEarlyDataPath(t *testing.T) {
+	transport, err := singBoxTransport("ws", json.RawMessage(`{"path":"/vpn?ed=2048&token=x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport["path"] != "/vpn?token=x" || transport["max_early_data"] != int64(2048) || transport["early_data_header_name"] != "Sec-WebSocket-Protocol" {
+		t.Fatalf("unexpected WebSocket transport: %#v", transport)
+	}
+}
+
 func TestSelectRoutesXrayGeodataMatchersToXray(t *testing.T) {
 	for _, route := range []RouteSpec{
 		{ID: 1, Action: "block", Match: []string{"geosite:category-ads-all"}},
@@ -186,8 +233,15 @@ func TestSingBoxResolvesBeforeProtectedIPRules(t *testing.T) {
 	if rule := document.Route.Rules[1]; rule["action"] != "reject" || rule["ip_cidr"] == nil || rule["port"] == nil {
 		t.Fatalf("management reject must follow resolve: %#v", rule)
 	}
-	if rule := document.Route.Rules[3]; rule["action"] != "reject" || rule["ip_is_private"] != true {
-		t.Fatalf("private-address reject must follow resolve: %#v", rule)
+	foundPrivateReject := false
+	for _, rule := range document.Route.Rules[2:] {
+		if rule["action"] == "reject" && rule["ip_is_private"] == true {
+			foundPrivateReject = true
+			break
+		}
+	}
+	if !foundPrivateReject {
+		t.Fatalf("private-address reject must follow resolve: %#v", document.Route.Rules)
 	}
 	if document.Experimental.ClashAPI.Secret != opts.ClashSecret {
 		t.Fatalf("Clash API secret was not rendered")
@@ -354,6 +408,35 @@ func TestRejectCustomOutbound(t *testing.T) {
 	_, err := (SingBoxRenderer{}).Render(node, []UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}, baseOptions())
 	if err == nil {
 		t.Fatal("expected custom outbound rejection")
+	}
+}
+
+func TestXrayAcceptsBoundedCustomOutboundTargetStrategy(t *testing.T) {
+	node := baseNode()
+	node.Routes = []RouteSpec{{
+		ID:          9,
+		Action:      "default_out",
+		ActionValue: `{"tag":"regional","protocol":"freedom","settings":{},"targetStrategy":"UseIPv4"}`,
+	}}
+	got, err := (XrayRenderer{}).Render(node, []UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}, baseOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got.Config), `"targetStrategy":"UseIPv4"`) {
+		t.Fatalf("custom outbound targetStrategy was not preserved: %s", got.Config)
+	}
+}
+
+func TestXrayRejectsCustomOutboundProtectedDNSAndUnknownFields(t *testing.T) {
+	for _, raw := range []string{
+		`{"tag":"dns-out","protocol":"freedom","settings":{}}`,
+		`{"tag":"regional","protocol":"freedom","settings":{},"unexpected":true}`,
+	} {
+		node := baseNode()
+		node.Routes = []RouteSpec{{ID: 9, Action: "default_out", ActionValue: raw}}
+		if _, err := (XrayRenderer{}).Render(node, []UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}, baseOptions()); err == nil {
+			t.Fatalf("accepted unsafe custom outbound %s", raw)
+		}
 	}
 }
 

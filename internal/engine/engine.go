@@ -17,6 +17,7 @@ const (
 	InboundTag = "v3node-in"
 	DirectTag  = "direct-out"
 	BlockTag   = "block-out"
+	DNSOutTag  = "dns-out"
 )
 
 type NodeSpec struct {
@@ -44,18 +45,19 @@ type NodeSpec struct {
 }
 
 type TLSSpec struct {
-	Mode             string // none, tls, reality
-	ServerName       string
-	ServerNames      []string
-	DestinationHost  string
-	DestinationPort  uint16
-	ShortIDs         []string
-	PrivateKey       string
-	MLDSA65Seed      string
-	Xver             uint64
-	CertificateFile  string
-	KeyFile          string
-	RejectUnknownSNI bool
+	Mode              string // none, tls, reality
+	ManagedSelfSigned bool
+	ServerName        string
+	ServerNames       []string
+	DestinationHost   string
+	DestinationPort   uint16
+	ShortIDs          []string
+	PrivateKey        string
+	MLDSA65Seed       string
+	Xver              uint64
+	CertificateFile   string
+	KeyFile           string
+	RejectUnknownSNI  bool
 }
 
 type UserSpec struct {
@@ -260,9 +262,12 @@ func validateRouteSpec(route RouteSpec) error {
 		if strings.TrimSpace(route.ActionValue) == "" {
 			return fmt.Errorf("route %d DNS action has no server", route.ID)
 		}
-	case "route", "route_ip", "default_out":
-		// These are rejected by both renderers because arbitrary panel-provided
-		// outbounds are outside this controller's trust boundary.
+	case "route", "route_ip":
+		if len(route.Match) == 0 {
+			return fmt.Errorf("route %d action %q requires at least one match", route.ID, route.Action)
+		}
+	case "default_out":
+		// A matcherless default route intentionally applies to both TCP and UDP.
 	default:
 		return fmt.Errorf("route %d has unsupported action %q", route.ID, route.Action)
 	}

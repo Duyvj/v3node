@@ -16,7 +16,7 @@
     "stop_timeout": "20s"
   },
   "runtime": {
-    "log_level": "info",
+    "log_level": "warn",
     "http_timeout": "15s",
     "stats_interval": "5s",
     "pull_interval_min": "15s",
@@ -35,6 +35,6 @@
   "network": {
     "dns_servers": [],
     "address_strategy": "auto",
-    "block_private": true
+    "block_private": false
   }
 }

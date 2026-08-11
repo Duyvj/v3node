@@ -127,6 +127,42 @@ func TestCompileTLSUsesConventionalCertificatePaths(t *testing.T) {
 	}
 }
 
+func TestCompileTLSNonePreservesExternalTermination(t *testing.T) {
+	node := model.NodeConfig{
+		Protocol: model.ProtocolVLESS, ServerPort: 443, Network: "ws", TLS: model.SecurityTLS,
+		TLSSettings: model.TLSSettings{CertMode: "none", ServerName: "edge.example"},
+	}
+	compiled, err := CompileState(node, []model.User{{ID: 1, UUID: "48e90e76-2a72-46be-ac91-45d96486977a"}}, config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Node.TLS.Mode != "none" || compiled.Node.TLS.CertificateFile != "" || compiled.Node.TLS.KeyFile != "" {
+		t.Fatalf("external TLS termination was changed: %#v", compiled.Node.TLS)
+	}
+}
+
+func TestCompileTLSSelfUsesPrivateManagedState(t *testing.T) {
+	local := config.Defaults()
+	local.Panel.NodeID = 42
+	node := model.NodeConfig{
+		Protocol: model.ProtocolTrojan, ServerPort: 443, Network: "tcp", TLS: model.SecurityTLS,
+		TLSSettings: model.TLSSettings{
+			CertMode: "self", ServerName: "edge.example",
+			CertFile: "/tmp/panel-selected.cer", KeyFile: "/tmp/panel-selected.key",
+		},
+	}
+	compiled, err := CompileState(node, []model.User{{ID: 1, UUID: "password"}}, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.Node.TLS.ManagedSelfSigned || compiled.Node.TLS.Mode != "tls" {
+		t.Fatalf("self-signed mode was not preserved: %#v", compiled.Node.TLS)
+	}
+	if compiled.Node.TLS.CertificateFile != "/var/lib/v3node/certificates/trojan42.cer" || compiled.Node.TLS.KeyFile != "/var/lib/v3node/certificates/trojan42.key" {
+		t.Fatalf("unexpected managed certificate paths: %#v", compiled.Node.TLS)
+	}
+}
+
 func TestCompileRejectsUnauditedAutomaticCertificateMode(t *testing.T) {
 	node := model.NodeConfig{
 		Protocol: model.ProtocolTrojan, ServerPort: 443, Network: "tcp", TLS: model.SecurityTLS,

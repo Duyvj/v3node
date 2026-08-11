@@ -26,6 +26,13 @@ func TestLoadDefaultsAndTokenFile(t *testing.T) {
 	}
 }
 
+func TestDefaultsMatchOriginalPrivateRoutingContract(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Network.BlockPrivate == nil || *cfg.Network.BlockPrivate {
+		t.Fatal("block_private must default to false for v2node routing compatibility")
+	}
+}
+
 func TestValidateResourceAndEndpointBounds(t *testing.T) {
 	valid := Defaults()
 	valid.Panel.URL = "https://panel.example"

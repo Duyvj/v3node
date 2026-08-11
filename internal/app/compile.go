@@ -78,7 +78,7 @@ func CompileState(node model.NodeConfig, users []model.User, local config.Config
 	}
 	spec.EncryptionSettings = encryptionSettings
 
-	tls, err := compileTLS(node, local.Panel.NodeID)
+	tls, err := compileTLS(node, local.Panel.NodeID, local.Engine.StateDir)
 	if err != nil {
 		return CompiledState{}, err
 	}
@@ -162,7 +162,7 @@ func ValidateBackendPolicies(backend string, users []engine.UserSpec) error {
 	return nil
 }
 
-func compileTLS(node model.NodeConfig, nodeID int64) (engine.TLSSpec, error) {
+func compileTLS(node model.NodeConfig, nodeID int64, stateDir string) (engine.TLSSpec, error) {
 	settings := node.TLSSettings
 	result := engine.TLSSpec{
 		Mode:             "none",
@@ -186,21 +186,46 @@ func compileTLS(node model.NodeConfig, nodeID int64) (engine.TLSSpec, error) {
 	case model.SecurityNone:
 		return result, nil
 	case model.SecurityTLS:
-		result.Mode = "tls"
 		switch strings.ToLower(strings.TrimSpace(settings.CertMode)) {
-		case "", "none", "file":
-		case "dns", "http", "self":
+		case "", "none":
+			// The original panel contract uses tls=1 with an empty/none
+			// cert_mode when TLS terminates at a reverse proxy. Do not turn
+			// that into an engine TLS listener requiring nonexistent files.
+			return result, nil
+		case "file":
+			result.Mode = "tls"
+		case "self":
+			result.Mode = "tls"
+			result.ManagedSelfSigned = true
+			if strings.TrimSpace(result.ServerName) == "" {
+				return engine.TLSSpec{}, errors.New("self-signed TLS requires a server_name")
+			}
+			// Managed material is always confined to the local state directory.
+			// A panel-provided path must not turn certificate generation into an
+			// arbitrary file write by the service account.
+			result.CertificateFile = path.Join(stateDir, "certificates", fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
+			result.KeyFile = path.Join(stateDir, "certificates", fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
+		case "dns", "http":
 			return engine.TLSSpec{}, fmt.Errorf("automatic certificate mode %q is not supported; provision certificate files and use cert_mode=file", settings.CertMode)
 		default:
 			return engine.TLSSpec{}, fmt.Errorf("unsupported certificate mode %q", settings.CertMode)
 		}
 		// Use deterministic per-node paths when the panel omits explicit
-		// filenames. Certificate issuance remains operator-managed.
+		// filenames. Self-signed material belongs in writable private state;
+		// operator-managed certificate files keep the original /etc convention.
 		if result.CertificateFile == "" {
-			result.CertificateFile = path.Join("/etc/v3node", fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
+			if result.ManagedSelfSigned {
+				result.CertificateFile = path.Join(stateDir, "certificates", fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
+			} else {
+				result.CertificateFile = path.Join("/etc/v3node", fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
+			}
 		}
 		if result.KeyFile == "" {
-			result.KeyFile = path.Join("/etc/v3node", fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
+			if result.ManagedSelfSigned {
+				result.KeyFile = path.Join(stateDir, "certificates", fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
+			} else {
+				result.KeyFile = path.Join("/etc/v3node", fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
+			}
 		}
 		if !isAbsoluteTargetPath(result.CertificateFile) || !isAbsoluteTargetPath(result.KeyFile) {
 			return engine.TLSSpec{}, errors.New("panel TLS certificate and key paths must be absolute")

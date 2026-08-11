@@ -5,7 +5,7 @@ V2Board/v2node. Đây là một sản phẩm độc lập: VPS sạch có thể 
 phát hành của dự án, không cần cài v2node gốc trước và cũng không cài đè lên
 source cũ.
 
-> **Trạng thái: beta trước phát hành.** Mã nguồn đã có kiểm thử đơn vị và kiểm
+> **Trạng thái: beta thử nghiệm.** Mã nguồn đã có kiểm thử đơn vị và kiểm
 > tra cấu hình với engine thật, nhưng chưa hoàn tất toàn bộ kiểm thử tải dài hạn,
 > chuyển cấu hình khi đang có nhiều phiên và đối soát traffic qua mọi tình huống
 > lỗi. Chưa nên dùng cho node thương mại quan trọng nếu chưa tự chạy staging và
@@ -62,7 +62,8 @@ Controller dùng các endpoint panel sau và luôn giữ `node_type=v2node`:
 
 `engine.backend: "auto"` ưu tiên sing-box cho cấu hình thông thường và chọn Xray
 khi cần XHTTP/SplitHTTP, xử lý `trusted_x_forwarded_for` hoặc route dùng cú pháp
-GeoIP/GeoSite của Xray. Một cấu hình không
+GeoIP/GeoSite/custom outbound của Xray. Custom outbound được giới hạn 256 KiB,
+chỉ nhận các field đã duyệt và không được dùng tag nội bộ. Một cấu hình không
 thể biểu diễn chính xác trên engine được chọn sẽ bị từ chối thay vì bị chuyển
 đổi âm thầm.
 
@@ -71,10 +72,12 @@ TUIC và AnyTLS bắt buộc có TLS. Chế độ `auto` dùng Xray cho Shadowso
 nhiều người dùng để giữ thống kê theo user, và dùng engine nhẹ cho Shadowsocks
 2022.
 
-Chứng thư TLS hiện do quản trị viên cấp và gia hạn; bản beta không nhận secret
-DNS từ panel để tự chạy ACME. Nếu panel bỏ trống đường dẫn, controller dùng quy
-ước cũ `/etc/v3node/<protocol><node-id>.cer` và `.key`. Reality không cần hai
-file này.
+Chế độ TLS `file` dùng chứng thư do quản trị viên cấp và gia hạn; nếu panel bỏ
+trống đường dẫn, controller dùng quy ước `/etc/v3node/<protocol><node-id>.cer`
+và `.key`. `cert_mode=self` được tạo một lần bằng ECDSA trong
+`/var/lib/v3node/certificates/`, không cần worker chạy nền. Bản beta chưa nhận
+secret DNS từ panel để tự chạy ACME `dns`/`http`. `tls=1` cùng `cert_mode=none`
+giữ đúng hợp đồng TLS termination bên ngoài. Reality không dùng các file cert.
 
 Các trạng thái cần hiểu rõ trong beta:
 
@@ -83,6 +86,7 @@ Các trạng thái cần hiểu rõ trong beta:
 | Đồng bộ cấu hình/users, report upload/download | Đã triển khai; tiếp tục cần soak/load test |
 | Giới hạn thiết bị theo IP | Enforce trên sing-box; cấu hình Xray có `device_limit > 0` bị từ chối rõ ràng |
 | `speed_limit` theo từng user | Chưa có data plane đủ an toàn; giá trị khác 0 bị từ chối thay vì âm thầm bỏ qua |
+| Nhiều panel/node trong một process | Chưa có; mỗi cài đặt beta hiện quản lý một node |
 | Cập nhật user không ngắt phiên | Chưa có; thay đổi cấu hình có thể restart engine và làm client reconnect |
 | Traffic qua lúc thay engine | Có final drain trước khi đổi engine và checkpoint; vẫn cần soak test đối soát dài hạn |
 
@@ -99,7 +103,8 @@ Traffic chờ report được giới hạn theo `max_users`. Có thể
 chỉnh trong `runtime`, nhưng tăng giới hạn cũng làm tăng RAM xấu nhất. RAM của engine còn phụ
 thuộc số kết nối đồng thời, protocol, QUIC, TLS và lưu lượng thực tế; dự án không
 cam kết một con số RAM cố định cho mọi VPS. Danh sách connection được giải mã
-streaming và chỉ sort lúc seed policy, còn cấu hình engine dùng JSON compact và
+streaming; toàn bộ IP chỉ được sort lúc seed policy, các vòng sau chỉ sort user
+thực sự có `device_limit`. Cấu hình engine dùng JSON compact và
 user struct thay vì một map động cho mỗi tài khoản để giảm heap spike khi reload.
 
 Unit systemd không đặt hard RAM limit để tránh OOM-kill phiên hợp lệ khi tải tăng.
@@ -107,12 +112,18 @@ Nó chạy bằng user `v3node`, chỉ có `CAP_NET_BIND_SERVICE`, bật account
 hạn vùng ghi. Profile BBR/socket là tùy chọn, xem `v3node tune --apply` sau khi đã
 đo baseline.
 
+Mặc định `network.block_private=false` để tương thích route của v2node gốc và
+cho phép khách truy cập LAN/VPC khi cần. Có thể bật thành `true`; dù ở chế độ
+nào, Stats/Connections API loopback của v3node vẫn luôn bị chặn khỏi VPN user.
+
 ## IP quốc gia, DNS và trải nghiệm khách hàng
 
 Ở chế độ direct egress, traffic khách hàng đi ra bằng public IP của VPS. Nếu VPS
 có IP Nhật và các dịch vụ đích nhận diện IP đó là Nhật, khách hàng thường được
 thấy như đang truy cập từ Nhật. `network.dns_servers` và lựa chọn IPv4/IPv6 có
-thể giúp phân giải/đường đi nhất quán hơn, nhưng không đổi danh tính public IP.
+thể giúp phân giải/đường đi nhất quán hơn. Cả hai engine chặn hướng DNS bị rò
+bằng cách đưa UDP/53 từ client vào DNS stack đã cấu hình, nhưng việc này không
+đổi danh tính public IP.
 
 Dự án **không thể**:
 
@@ -138,10 +149,11 @@ Host mục tiêu hiện là Debian 12 hoặc Ubuntu 22.04 trở lên, systemd, k
 | `/etc/v3node/panel.token` | API token đề xuất |
 | `/var/lib/v3node/` | state, checkpoint, last-known-good |
 
-Source tree hiện tại cố ý khóa cài qua mạng cho tới khi release có binary và
-SHA-256 thật. Không chạy `curl .../main/install.sh | bash` và không thay checksum
-placeholder. Khi beta được xuất bản, chỉ dùng `install.sh` gắn với một tag cụ thể
-trong GitHub Releases, kiểm tra checksum theo release notes rồi mới chạy:
+Installer trên nhánh phát triển cố ý giữ checksum placeholder; quy trình đóng
+gói chỉ thay chúng trong artifact của release. Không chạy
+`curl .../main/install.sh | bash` và không tự thay placeholder. Chỉ dùng
+`install.sh` gắn với một tag cụ thể trong GitHub Releases, kiểm tra checksum
+theo release notes rồi mới chạy:
 
 ```bash
 curl -fLO --proto '=https' --tlsv1.2 \
@@ -154,7 +166,16 @@ Installer của release cài controller và engine cần thiết; không cần v
 Quy trình build/cài local trước release nằm trong
 [`docs/deployment.md`](docs/deployment.md).
 
-Sau khi cài, tạo token và cấu hình:
+Có thể tạo cấu hình ngay khi cài mà không để token trong argv/history:
+
+```bash
+sudo bash ./install.sh \
+  --panel-url https://panel.example.com \
+  --node-id 42 \
+  --token-file ./panel.token
+```
+
+Hoặc sau khi cài, tạo token và cấu hình thủ công:
 
 ```bash
 sudo install -d -m 0750 -o root -g v3node /etc/v3node
@@ -177,6 +198,14 @@ systemctl status v3node.service
 sudo journalctl -u v3node.service -n 100 --no-pager
 ```
 
+CLI cũng có các lệnh `start`, `stop`, `restart`, `status`, `enable`, `disable`,
+`log`, `generate`, `config`, `update`, `uninstall`, `x25519` và `tune`. Chạy
+`v3node` trong terminal sẽ mở menu giới hạn; `v3node config` giữ backup, kiểm
+tra online rồi mới restart và tự phục hồi nếu cấu hình mới lỗi. `update` chỉ chạy
+installer sau khi kiểm tra `install.sh` bằng `SHA256SUMS` của cùng GitHub
+Release; build beta theo kênh prerelease, còn build stable mặc định bỏ qua
+prerelease.
+
 Không đặt token trong câu lệnh, ảnh chụp hoặc repository. Production phải dùng
 HTTPS tới panel; HTTP chỉ dành cho mạng phát triển cô lập.
 
@@ -192,7 +221,8 @@ nên không ghi đè `/etc/v2node`, `v2node.service` hay binary cũ. Không đư
 file cấu hình v2node trực tiếp cho controller mới; hãy tạo config mới từ example
 của đúng release.
 
-Trên VPS đang chạy, có thể cài `v3node` với `--no-start`, chạy `v3node check`,
+Trên VPS đang chạy, có thể cài `v3node` với `--no-start`, chạy
+`sudo -u v3node v3node check`,
 rồi mới dừng `v2node.service` và khởi động `v3node.service`. Hai data plane không
 thể cùng giữ một cổng node. Nếu cutover lỗi, dừng v3node và khởi động lại service
 v2node cũ. Quy trình đầy đủ nằm trong

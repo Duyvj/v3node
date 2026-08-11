@@ -42,6 +42,8 @@ readonly BACKUP_ROOT=/var/backups/v3node
 
 config_source=
 token_source=
+panel_url=
+panel_node_id=
 local_v3node_file=
 local_v3node_sha256=
 local_sing_box_file=
@@ -72,6 +74,9 @@ Usage: install.sh [options]
                             Existing configuration is otherwise preserved.
   --token-file FILE         Install FILE as /etc/v3node/panel.token with
                             root:v3node ownership and mode 0640.
+  --panel-url URL           Generate config.json for this panel URL.
+  --node-id ID              Positive node ID used with --panel-url.
+                            Requires --token-file and conflicts with --config.
   --v3node-file FILE        Use a local controller binary instead of the
                             versioned release asset.
   --v3node-sha256 SHA256    Required SHA256 for --v3node-file.
@@ -111,6 +116,16 @@ while [[ $# -gt 0 ]]; do
         --token-file)
             [[ $# -ge 2 ]] || die '--token-file requires a file'
             token_source=$2
+            shift 2
+            ;;
+        --panel-url)
+            [[ $# -ge 2 ]] || die '--panel-url requires a URL'
+            panel_url=$2
+            shift 2
+            ;;
+        --node-id)
+            [[ $# -ge 2 ]] || die '--node-id requires an integer'
+            panel_node_id=$2
             shift 2
             ;;
         --v3node-file)
@@ -323,6 +338,17 @@ stage_inputs() {
     if [[ -z ${local_v3node_file} && $controller_version != "v3node ${V3NODE_VERSION} "* ]]; then
         die "controller binary does not report release version ${V3NODE_VERSION}"
     fi
+    if [[ -n ${panel_url} ]]; then
+        "$stage_dir/v3node" generate \
+            --config "$stage_dir/config.json" \
+            --panel-url "$panel_url" \
+            --node-id "$panel_node_id" \
+            --token-file "${CONFIG_DIR}/panel.token" \
+            --skip-ownership \
+            || die 'could not generate configuration from --panel-url and --node-id'
+        chmod 0600 "$stage_dir/config.json"
+        config_source=$stage_dir/config.json
+    fi
 
     if [[ -n ${local_sing_box_file} ]]; then
         [[ -n ${local_sing_box_sha256} ]] || die '--sing-box-file requires --sing-box-sha256'
@@ -511,7 +537,7 @@ write_example_config() {
     "stop_timeout": "20s"
   },
   "runtime": {
-    "log_level": "info",
+    "log_level": "warn",
     "http_timeout": "15s",
     "stats_interval": "5s",
     "pull_interval_min": "15s",
@@ -530,7 +556,7 @@ write_example_config() {
   "network": {
     "dns_servers": [],
     "address_strategy": "auto",
-    "block_private": true
+    "block_private": false
   }
 }
 CONFIG_EOF
@@ -1164,6 +1190,12 @@ main() {
     fi
     if [[ -n ${token_source} ]]; then
         [[ -f ${token_source} && ! -L ${token_source} ]] || die '--token-file must reference a regular file'
+    fi
+    if [[ -n ${panel_url} || -n ${panel_node_id} ]]; then
+        [[ -n ${panel_url} && -n ${panel_node_id} ]] || die '--panel-url and --node-id must be used together'
+        [[ ${panel_node_id} =~ ^[1-9][0-9]*$ ]] || die '--node-id must be a positive integer'
+        [[ -z ${config_source} ]] || die '--panel-url conflicts with --config'
+        [[ -n ${token_source} ]] || die '--panel-url requires --token-file'
     fi
     for managed_directory in "$CONFIG_DIR" "$STATE_DIR" "$RUN_DIR" "$META_DIR" "$LIB_DIR" "$DOC_DIR" "$BACKUP_ROOT"; do
         validate_managed_directory "$managed_directory"

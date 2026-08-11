@@ -357,3 +357,47 @@ func TestProcessConnectionsEnforcesBeforeThresholdAndAggregatesByDevice(t *testi
 		t.Fatalf("aggregated device was not reported: %#v", reported)
 	}
 }
+
+func TestProcessConnectionsSortsOnlyLimitedUsersAfterSeed(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:               cfg,
+		connections:       connections,
+		online:            tracker,
+		alive:             make(model.AliveUsers),
+		connectionsSeeded: true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1, "uid-2": 2},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 1}},
+		},
+		haveActive: true,
+	}
+	start := time.Unix(1_700_000_000, 0)
+	older := netip.MustParseAddr("192.0.2.10")
+	newer := netip.MustParseAddr("192.0.2.20")
+	snapshot := []engine.ActiveConnection{
+		{ID: "newer-limited", User: "uid-1", SourceIP: newer, Upload: 1, StartedAt: start.Add(time.Second)},
+		{ID: "unlimited", User: "uid-2", SourceIP: netip.MustParseAddr("192.0.2.30"), Upload: 1, StartedAt: start.Add(2 * time.Second)},
+		{ID: "older-limited", User: "uid-1", SourceIP: older, Upload: 1, StartedAt: start},
+	}
+	if err := controller.processConnections(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.Has(1, older.String()) || tracker.Has(1, newer.String()) {
+		t.Fatalf("limited user did not retain oldest IP: %#v", tracker.SnapshotMap())
+	}
+	if !tracker.Has(2, "192.0.2.30") {
+		t.Fatalf("unlimited user was not processed: %#v", tracker.SnapshotMap())
+	}
+	closed := connections.closedIDs()
+	if len(closed) != 1 || closed[0] != "newer-limited" {
+		t.Fatalf("closed connections = %#v", closed)
+	}
+}

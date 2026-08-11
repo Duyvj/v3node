@@ -94,6 +94,8 @@ comes from bounded inputs and retained state:
   default); panel report payload and small control responses are independently
   bounded by `max_panel_payload_bytes` (32 MiB by default);
 - bounded retry/backoff rather than an unbounded retry queue;
+- after the initial online-policy seed, sorting is limited to users with a
+  non-zero device policy instead of copying/sorting every online IP each poll;
 - an external engine process whose lifecycle can be observed and replaced;
 - journald output instead of an application-owned, unbounded log file.
 

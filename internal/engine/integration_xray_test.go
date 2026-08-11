@@ -57,6 +57,13 @@ func TestXrayOfficialBinary(t *testing.T) {
 			Protocol: "shadowsocks", Listen: "127.0.0.1", Port: 21005, Transport: "tcp",
 			Cipher: "2022-blake3-aes-256-gcm", ServerKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", TLS: TLSSpec{Mode: "none"},
 		},
+		{
+			Protocol: "vless", Listen: "127.0.0.1", Port: 21007, Transport: "tcp", TLS: TLSSpec{Mode: "none"},
+			Routes: []RouteSpec{{
+				ID: 7, Action: "route", Match: []string{"domain:example.com"},
+				ActionValue: `{"tag":"regional","protocol":"freedom","settings":{"domainStrategy":"UseIPv4"}}`,
+			}},
+		},
 	}
 	for _, node := range cases {
 		t.Run(node.Protocol+"-"+node.Transport, func(t *testing.T) {

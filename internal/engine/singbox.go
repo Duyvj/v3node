@@ -65,7 +65,16 @@ func (SingBoxRenderer) Supports(node NodeSpec) error {
 	if node.TLS.MLDSA65Seed != "" || node.TLS.Xver != 0 {
 		return errors.New("Reality ML-DSA/xver settings require the Xray backend")
 	}
+	if node.TLS.Mode == "reality" && len(node.TLS.ServerNames) > 1 {
+		return errors.New("Reality with multiple server names requires the Xray backend")
+	}
+	if err := singBoxTransportSettingsCompatible(node.Transport, node.TransportSettings); err != nil {
+		return err
+	}
 	for _, route := range node.Routes {
+		if route.Action == "route" || route.Action == "route_ip" || route.Action == "default_out" {
+			return fmt.Errorf("route %d custom outbound requires the Xray backend", route.ID)
+		}
 		for _, match := range route.Match {
 			if strings.HasPrefix(match, "geosite:") || strings.HasPrefix(match, "geoip:") {
 				return fmt.Errorf("route %d uses Xray geodata matcher %q; use the Xray backend", route.ID, match)
@@ -306,12 +315,82 @@ func hasNonPlainTCPHeader(raw json.RawMessage) bool {
 	if json.Unmarshal(raw, &settings) != nil {
 		return true
 	}
+	for _, key := range []string{"path", "Host", "host"} {
+		if value, ok := settings[key].(string); ok && value != "" {
+			return true
+		}
+	}
 	header, ok := settings["header"].(map[string]any)
 	if !ok {
 		return false
 	}
 	typeName, _ := header["type"].(string)
 	return typeName != "" && typeName != "none"
+}
+
+func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error {
+	kind = strings.ToLower(kind)
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	settings, err := decodeSettings(raw)
+	if err != nil {
+		return err
+	}
+	known := map[string]struct{}{"acceptProxyProtocol": {}}
+	switch kind {
+	case "", "tcp", "raw":
+		known["header"] = struct{}{}
+	case "ws":
+		for _, key := range []string{"path", "headers", "maxEarlyData", "earlyDataHeaderName"} {
+			known[key] = struct{}{}
+		}
+	case "grpc":
+		for _, key := range []string{
+			"serviceName", "service_name", "idle_timeout", "idleTimeout",
+			"health_check_timeout", "healthCheckTimeout", "permit_without_stream", "permitWithoutStream",
+			"multiMode", "multi_mode",
+		} {
+			known[key] = struct{}{}
+		}
+		for _, key := range []string{"multiMode", "multi_mode"} {
+			if value, ok := settings[key].(bool); ok && value {
+				return errors.New("gRPC multiMode requires the Xray backend")
+			}
+		}
+	case "httpupgrade":
+		for _, key := range []string{"host", "path", "headers", "header"} {
+			known[key] = struct{}{}
+		}
+		if pathValue, _ := settings["path"].(string); webSocketEarlyData(pathValue) > 0 {
+			return errors.New("HTTPUpgrade early data requires the Xray backend")
+		}
+	case "http":
+		for _, key := range []string{"path", "host", "headers"} {
+			known[key] = struct{}{}
+		}
+	default:
+		return fmt.Errorf("sing-box does not support transport %q", kind)
+	}
+	for key := range settings {
+		if _, ok := known[key]; !ok {
+			return fmt.Errorf("transport %s setting %q requires the Xray backend", kind, key)
+		}
+	}
+	return nil
+}
+
+func webSocketEarlyData(pathValue string) int64 {
+	parsed, err := url.Parse(pathValue)
+	if err != nil {
+		return 0
+	}
+	value := parsed.Query().Get("ed")
+	parsedValue, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || parsedValue <= 0 {
+		return 0
+	}
+	return parsedValue
 }
 
 func acceptsProxyProtocol(raw json.RawMessage) bool {
@@ -348,7 +427,24 @@ func singBoxTransport(kind string, raw json.RawMessage) (map[string]any, error) 
 	result := map[string]any{"type": kind}
 	switch kind {
 	case "ws":
-		copyString(settings, result, "path", "path")
+		if pathValue, ok := settings["path"].(string); ok && pathValue != "" {
+			parsed, parseErr := url.Parse(pathValue)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse WebSocket path: %w", parseErr)
+			}
+			query := parsed.Query()
+			if earlyData := webSocketEarlyData(pathValue); earlyData > 0 {
+				if _, configured := settings["maxEarlyData"]; !configured {
+					result["max_early_data"] = earlyData
+				}
+				if _, configured := settings["earlyDataHeaderName"]; !configured {
+					result["early_data_header_name"] = "Sec-WebSocket-Protocol"
+				}
+				query.Del("ed")
+				parsed.RawQuery = query.Encode()
+			}
+			result["path"] = parsed.String()
+		}
 		copyMap(settings, result, "headers", "headers")
 		copyNumber(settings, result, "maxEarlyData", "max_early_data")
 		copyString(settings, result, "earlyDataHeaderName", "early_data_header_name")
@@ -541,7 +637,16 @@ func singBoxEncryptedDNSServer(value, tag, scheme string, defaultPort int, defau
 }
 
 func singBoxRoutes(routes []RouteSpec, blockPrivate bool) ([]map[string]any, []map[string]any, []map[string]any, error) {
-	rules := make([]map[string]any, 0, len(routes)+1)
+	// Keep the original v2node DNS contract: UDP queries sent by clients to an
+	// arbitrary resolver on port 53 are answered by the engine's configured DNS
+	// stack. This avoids resolver/location leaks without opening a second local
+	// listener or keeping another process resident.
+	rules := make([]map[string]any, 0, len(routes)+3)
+	rules = append(rules, map[string]any{
+		"network": "udp",
+		"port":    []int{53},
+		"action":  "hijack-dns",
+	})
 	dnsRules := make([]map[string]any, 0)
 	dnsServers := make([]map[string]any, 0)
 	if blockPrivate {

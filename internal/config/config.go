@@ -111,7 +111,11 @@ type NetworkConfig struct {
 }
 
 func Defaults() Config {
-	blockPrivate := true
+	// Match the original v2node routing contract: private/VPC destinations are
+	// reachable unless the operator explicitly opts into blocking them. The
+	// renderers still unconditionally protect v3node's loopback management
+	// endpoints, so disabling this broader policy does not expose their APIs.
+	blockPrivate := false
 	return Config{
 		Engine: EngineConfig{
 			Backend:       "auto",

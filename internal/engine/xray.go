@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -14,6 +17,9 @@ import (
 // supports only protocols for which stock Xray provides compatible user and
 // statistics APIs. QUIC-native panel protocols are delegated to sing-box.
 type XrayRenderer struct{}
+
+var customOutboundTagPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+var customOutboundProtocolPattern = regexp.MustCompile(`^[a-z][a-z0-9_.+-]{0,63}$`)
 
 type xrayClientConfig struct {
 	Email    string `json:"email"`
@@ -141,7 +147,7 @@ func (r XrayRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (Ren
 		"settings": map[string]any{"address": apiHost},
 	}
 
-	rules, dns, err := xrayRoutes(node.Routes, opts.BlockPrivate, opts.DNSServers, opts.AddressStrategy)
+	rules, dns, customOutbounds, err := xrayRoutes(node.Routes, opts.BlockPrivate, opts.DNSServers, opts.AddressStrategy)
 	if err != nil {
 		return Rendered{}, err
 	}
@@ -159,6 +165,7 @@ func (r XrayRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (Ren
 			"inboundTag":  []string{"management-api-in"},
 			"outboundTag": "management-api",
 		},
+		xrayDNSHijackRule(),
 		{
 			"type":        "field",
 			"inboundTag":  []string{InboundTag},
@@ -168,6 +175,24 @@ func (r XrayRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (Ren
 		},
 	}, rules...)
 
+	outbounds := []any{
+		map[string]any{
+			"tag":      DirectTag,
+			"protocol": "freedom",
+			"settings": xrayFreedomSettings(opts.AddressStrategy, opts.BlockPrivate),
+		},
+		map[string]any{
+			"tag":      BlockTag,
+			"protocol": "blackhole",
+			"settings": map[string]any{},
+		},
+		map[string]any{
+			"tag":      DNSOutTag,
+			"protocol": "dns",
+			"settings": map[string]any{},
+		},
+	}
+	outbounds = append(outbounds, customOutbounds...)
 	doc := map[string]any{
 		"log": map[string]any{
 			"loglevel": xrayLogLevel(opts.LogLevel),
@@ -189,20 +214,9 @@ func (r XrayRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (Ren
 				},
 			},
 		},
-		"dns":      dns,
-		"inbounds": []any{apiInbound, mainInbound},
-		"outbounds": []any{
-			map[string]any{
-				"tag":      DirectTag,
-				"protocol": "freedom",
-				"settings": xrayFreedomSettings(opts.AddressStrategy, opts.BlockPrivate),
-			},
-			map[string]any{
-				"tag":      BlockTag,
-				"protocol": "blackhole",
-				"settings": map[string]any{},
-			},
-		},
+		"dns":       dns,
+		"inbounds":  []any{apiInbound, mainInbound},
+		"outbounds": outbounds,
 		"routing": map[string]any{
 			// Resolve unmatched domains before IP rules so the private/metadata
 			// destination block cannot be bypassed with a DNS name.
@@ -395,12 +409,14 @@ func xrayShadowsocksRawSettings(settings map[string]any) map[string]any {
 	}
 }
 
-func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, addressStrategy string) ([]map[string]any, map[string]any, error) {
+func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, addressStrategy string) ([]map[string]any, map[string]any, []any, error) {
 	rules := make([]map[string]any, 0, len(routes)+1)
 	dnsServers := make([]any, 0, len(configuredDNS)+1)
+	customOutbounds := make([]any, 0)
+	customByTag := make(map[string]map[string]any)
 	for _, server := range configuredDNS {
 		if strings.TrimSpace(server) == "" {
-			return nil, nil, errors.New("configured DNS server is empty")
+			return nil, nil, nil, errors.New("configured DNS server is empty")
 		}
 		dnsServers = append(dnsServers, server)
 	}
@@ -438,7 +454,7 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 			rule["outboundTag"] = BlockTag
 		case "dns":
 			if route.ActionValue == "" {
-				return nil, nil, fmt.Errorf("DNS route %d has no server", route.ID)
+				return nil, nil, nil, fmt.Errorf("DNS route %d has no server", route.ID)
 			}
 			dnsServers = append(dnsServers, map[string]any{
 				"address":      route.ActionValue,
@@ -447,9 +463,29 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 			})
 			continue
 		case "route", "route_ip", "default_out":
-			return nil, nil, fmt.Errorf("route %d requests a custom outbound; arbitrary panel outbounds are disabled", route.ID)
+			outbound, tag, err := parseXrayCustomOutbound(route.ID, route.ActionValue)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if previous, exists := customByTag[tag]; exists {
+				if !xrayJSONEquivalent(previous, outbound) {
+					return nil, nil, nil, fmt.Errorf("route %d redefines custom outbound tag %q", route.ID, tag)
+				}
+			} else {
+				customByTag[tag] = outbound
+				customOutbounds = append(customOutbounds, outbound)
+			}
+			switch route.Action {
+			case "route":
+				rule["domain"] = route.Match
+			case "route_ip":
+				rule["ip"] = route.Match
+			case "default_out":
+				rule["network"] = "tcp,udp"
+			}
+			rule["outboundTag"] = tag
 		default:
-			return nil, nil, fmt.Errorf("route %d has unsupported action %q", route.ID, route.Action)
+			return nil, nil, nil, fmt.Errorf("route %d has unsupported action %q", route.ID, route.Action)
 		}
 		rules = append(rules, rule)
 	}
@@ -457,7 +493,113 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 		"servers":       dnsServers,
 		"queryStrategy": xrayDNSQueryStrategy(addressStrategy),
 	}
-	return rules, dns, nil
+	return rules, dns, customOutbounds, nil
+}
+
+func xrayDNSHijackRule() map[string]any {
+	// Match v2node's DNS interception contract. Client UDP/53 traffic is sent
+	// through Xray's built-in DNS outbound so the configured regional/routed
+	// resolvers are used instead of leaking the resolver selected by the client.
+	return map[string]any{
+		"type":        "field",
+		"inboundTag":  []string{InboundTag},
+		"network":     "udp",
+		"port":        "53",
+		"outboundTag": DNSOutTag,
+	}
+}
+
+func parseXrayCustomOutbound(routeID int, raw string) (map[string]any, string, error) {
+	if len(raw) == 0 || len(raw) > 256<<10 {
+		return nil, "", fmt.Errorf("route %d custom outbound must contain between 1 byte and 256 KiB", routeID)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var outbound map[string]any
+	if err := decoder.Decode(&outbound); err != nil {
+		return nil, "", fmt.Errorf("route %d decode custom outbound: %w", routeID, err)
+	}
+	if outbound == nil {
+		return nil, "", fmt.Errorf("route %d custom outbound must be a JSON object", routeID)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, "", fmt.Errorf("route %d custom outbound contains trailing JSON", routeID)
+	}
+	allowed := map[string]struct{}{
+		"tag": {}, "protocol": {}, "settings": {}, "streamSettings": {},
+		"proxySettings": {}, "sendThrough": {}, "mux": {}, "targetStrategy": {},
+	}
+	for key := range outbound {
+		if _, ok := allowed[key]; !ok {
+			return nil, "", fmt.Errorf("route %d custom outbound contains unsupported field %q", routeID, key)
+		}
+	}
+	tag, _ := outbound["tag"].(string)
+	protocol, _ := outbound["protocol"].(string)
+	if !customOutboundTagPattern.MatchString(tag) {
+		return nil, "", fmt.Errorf("route %d custom outbound has invalid tag", routeID)
+	}
+	if !customOutboundProtocolPattern.MatchString(protocol) {
+		return nil, "", fmt.Errorf("route %d custom outbound has invalid protocol", routeID)
+	}
+	switch tag {
+	case DirectTag, BlockTag, DNSOutTag, InboundTag, "management-api", "management-api-in":
+		return nil, "", fmt.Errorf("route %d custom outbound uses protected tag %q", routeID, tag)
+	}
+	return outbound, tag, nil
+}
+
+func xrayJSONEquivalent(left, right any) bool {
+	switch leftValue := left.(type) {
+	case nil:
+		return right == nil
+	case bool:
+		rightValue, ok := right.(bool)
+		return ok && leftValue == rightValue
+	case string:
+		rightValue, ok := right.(string)
+		return ok && leftValue == rightValue
+	case json.Number:
+		rightValue, ok := right.(json.Number)
+		if !ok {
+			return false
+		}
+		// Avoid constructing an enormous big.Rat from a panel-supplied numeric
+		// literal near the total outbound-size limit. Ordinary engine numbers are
+		// tiny; oversized literals are equivalent only when byte-identical.
+		if len(leftValue.String()) > 128 || len(rightValue.String()) > 128 {
+			return leftValue.String() == rightValue.String()
+		}
+		leftNumber, leftOK := new(big.Rat).SetString(leftValue.String())
+		rightNumber, rightOK := new(big.Rat).SetString(rightValue.String())
+		return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+	case []any:
+		rightValue, ok := right.([]any)
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for index := range leftValue {
+			if !xrayJSONEquivalent(leftValue[index], rightValue[index]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		rightValue, ok := right.(map[string]any)
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for key, leftItem := range leftValue {
+			rightItem, exists := rightValue[key]
+			if !exists || !xrayJSONEquivalent(leftItem, rightItem) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func xrayDNSQueryStrategy(value string) string {

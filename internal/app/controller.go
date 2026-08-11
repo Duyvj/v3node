@@ -342,6 +342,9 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	if err := ValidateBackendPolicies(renderer.Name(), compiled.Users); err != nil {
 		return err
 	}
+	if err := EnsureManagedCertificate(compiled.Node); err != nil {
+		return fmt.Errorf("prepare managed TLS certificate: %w", err)
+	}
 	rendered, err := renderer.Render(compiled.Node, compiled.Users, engine.Options{
 		LogLevel:        c.cfg.Runtime.LogLevel,
 		StatsListen:     c.cfg.Engine.StatsListen,
@@ -513,13 +516,21 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 		observations[key] = observation
 	}
 
-	devices := make([]connectionDeviceObservation, 0, len(observations))
-	for _, observation := range observations {
-		devices = append(devices, observation)
+	// The first complete snapshot seeds every user deterministically. Later
+	// snapshots only need deterministic ordering for users with an actual
+	// device limit; unlimited users can be processed directly from the bounded
+	// observation map. This avoids allocating and sorting a second full online-
+	// IP slice every five seconds on the common no-limit path.
+	seedAll := !c.connectionsSeeded
+	devices := make([]connectionDeviceObservation, 0)
+	if seedAll {
+		devices = make([]connectionDeviceObservation, 0, len(observations))
 	}
-	// Deterministically retain the oldest IPs when several devices appear in
-	// the same API snapshot. The sort is over unique user/IP pairs rather than
-	// every connection, which keeps the cost bounded by online-device count.
+	for _, observation := range observations {
+		if seedAll || c.active.Policies[observation.key.userID].DeviceLimit > 0 {
+			devices = append(devices, observation)
+		}
+	}
 	sort.Slice(devices, func(i, j int) bool {
 		if !devices[i].startedAt.Equal(devices[j].startedAt) {
 			return devices[i].startedAt.Before(devices[j].startedAt)
@@ -532,7 +543,7 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 
 	localCounts := make(map[int]int)
 	rejected := make(map[connectionDeviceKey]struct{})
-	for _, device := range devices {
+	processDevice := func(device connectionDeviceObservation) error {
 		userID := device.key.userID
 		address := device.key.address.String()
 		policy := c.active.Policies[userID]
@@ -553,7 +564,7 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 				if current >= policy.DeviceLimit {
 					rejected[device.key] = struct{}{}
 					localCounts[userID] = count
-					continue
+					return nil
 				}
 				count++
 			}
@@ -566,6 +577,22 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 		// connections can no longer evade the panel's reporting threshold.
 		if device.traffic > c.active.DeviceOnlineMinBytes {
 			if err := c.online.Observe(userID, address); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, device := range devices {
+		if err := processDevice(device); err != nil {
+			return err
+		}
+	}
+	if !seedAll {
+		for _, device := range observations {
+			if c.active.Policies[device.key.userID].DeviceLimit > 0 {
+				continue
+			}
+			if err := processDevice(device); err != nil {
 				return err
 			}
 		}

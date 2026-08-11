@@ -2,12 +2,12 @@
 
 ## Release state
 
-Before the first published release, the remote installer is intentionally
-locked: its controller and required-feature sing-box checksums are placeholders,
-so it exits before changing the host. Release maintainers replace those four
-hashes in `deploy/release-manifest.env` and `deploy/install.sh` after building
-and reviewing amd64 and arm64 assets. The stock Xray archives are separately
-pinned to their official versioned upstream assets and reviewed SHA256 values.
+The development-branch installer is intentionally locked: controller and
+required-feature sing-box checksums remain placeholders, so a raw branch script
+exits before changing the host. Release assembly replaces those values only in
+the tagged installer artifact after building and reviewing amd64/arm64 assets.
+The stock Xray archives are separately pinned to their official versioned
+upstream assets and reviewed SHA256 values.
 
 For a fully local test build, supply all binaries/archives and their digests
 explicitly:
@@ -43,10 +43,10 @@ archive. At runtime only the engine selected for the current node is started.
 A supported clean VPS does not need the original wyx2685/v2node, Go, sing-box,
 or Xray preinstalled. The installer creates the unprivileged service account
 and managed directories, installs the controller plus both pinned engines, and
-starts only the engine selected by the panel node configuration. The current
-unpublished source tree cannot install from the network because its project
-asset hashes are deliberately locked; use the fully local, hash-verified
-command above until a tagged release exists.
+starts only the engine selected by the panel node configuration. The development
+source tree cannot install from the network because its project asset hashes are
+deliberately locked; use a tagged release or the fully local, hash-verified
+command above.
 
 For a published release, download `install.sh` from one exact release tag,
 verify it against the checksum published with that release, and run the local
@@ -78,16 +78,27 @@ apply their ownership and permissions:
 sudo ./install.sh --config ./config.json --token-file ./panel.token
 ```
 
+For a clean install, the release installer can also generate the local config
+through the verified staged binary:
+
+```bash
+sudo ./install.sh \
+  --panel-url https://panel.example.com \
+  --node-id 42 \
+  --token-file ./panel.token
+```
+
 Set the HTTPS panel URL and positive node ID. Add `network.dns_servers` only
 when regional resolvers have been deliberately selected. There is no local
 switch that changes the GeoIP identity of the VPS address.
 
-For a TLS (non-Reality) node, provision the panel-selected certificate and key
-before running `v3node check`. If the panel leaves their paths empty, install
-them as `/etc/v3node/<protocol><node-id>.cer` and `.key`, owned by
+For a TLS `file` (non-Reality) node, provision the panel-selected certificate
+and key before running `v3node check`. If the panel leaves their paths empty,
+install them as `/etc/v3node/<protocol><node-id>.cer` and `.key`, owned by
 `root:v3node` with certificate mode `0644` or stricter and key mode `0640`.
-Automatic `dns`, `http`, and `self` certificate modes from the original node
-are not implemented in this beta.
+For `cert_mode=self`, `v3node check` creates a private ECDSA pair atomically
+below `/var/lib/v3node/certificates`. Automatic `dns` and `http` ACME modes are
+not implemented in this beta.
 
 Then start and inspect the node:
 
@@ -97,6 +108,10 @@ sudo systemctl enable --now v3node.service
 systemctl status v3node.service
 sudo journalctl -u v3node.service -n 100 --no-pager
 ```
+
+For later edits, `sudo v3node config` keeps a bounded `.bak`, runs the same
+online engine check, restarts only after validation, and restores/restarts the
+previous config if activation fails.
 
 When installation is allowed to start the service, it first runs `v3node check`
 against the real panel response and the installed engine. A failed check does

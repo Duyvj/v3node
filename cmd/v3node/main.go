@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -32,11 +31,20 @@ var (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, readerIsTerminal(os.Stdin)))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runCLI(args, os.Stdin, stdout, stderr, readerIsTerminal(os.Stdin))
+}
+
+func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer, stdinTTY bool) int {
 	if len(args) == 0 {
+		if stdinTTY {
+			return runInteractiveMenu(stdin, stdout, stderr, func(selected []string) int {
+				return runCLI(selected, stdin, stdout, stderr, false)
+			})
+		}
 		printUsage(stderr)
 		return 2
 	}
@@ -65,6 +73,48 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "start", "stop", "restart", "status", "enable", "disable":
+		if err := runServiceCommand(args[0], args[1:], stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: %s failed: %v\n", args[0], err)
+			return 1
+		}
+		return 0
+	case "log", "logs":
+		if err := runLogs(args[1:], stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: log failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "generate":
+		if err := runGenerate(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: generate failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "config":
+		if err := runConfig(args[1:], stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: config failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "update", "install", "update-shell":
+		if err := runUpdate(args[1:], stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: update failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "uninstall":
+		if err := runUninstall(args[1:], stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: uninstall failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "x25519":
+		if err := runX25519(args[1:], stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "v3node: x25519 failed: %v\n", err)
+			return 1
+		}
+		return 0
 	case "version", "--version", "-version":
 		fmt.Fprintf(stdout, "v3node %s (commit %s, built %s, %s/%s)\n", version, commit, builtAt, runtime.GOOS, runtime.GOARCH)
 		return 0
@@ -84,7 +134,19 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  run       run the panel controller and protocol engine")
 	fmt.Fprintln(writer, "  check     fetch, compile, and validate panel configuration")
 	fmt.Fprintln(writer, "  diagnose  inspect local configuration without printing secrets")
-	fmt.Fprintln(writer, "  tune      show or explicitly apply conservative host tuning")
+	fmt.Fprintln(writer, "  start     start v3node.service")
+	fmt.Fprintln(writer, "  stop      stop v3node.service")
+	fmt.Fprintln(writer, "  restart   restart v3node.service")
+	fmt.Fprintln(writer, "  status    show v3node.service status")
+	fmt.Fprintln(writer, "  enable    enable service start at boot")
+	fmt.Fprintln(writer, "  disable   disable service start at boot")
+	fmt.Fprintln(writer, "  log       show or follow bounded journal output")
+	fmt.Fprintln(writer, "  generate  generate a secure local config without a token in argv")
+	fmt.Fprintln(writer, "  config    safely edit, validate, and activate local configuration")
+	fmt.Fprintln(writer, "  update    checksum-verify and install a GitHub release")
+	fmt.Fprintln(writer, "  uninstall run the installed safe uninstaller")
+	fmt.Fprintln(writer, "  x25519    generate a Reality X25519 key pair with Xray")
+	fmt.Fprintln(writer, "  tune      status, apply, or remove conservative host tuning")
 	fmt.Fprintln(writer, "  version   print build information")
 }
 
@@ -192,12 +254,18 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if compiled.Node.TLS.ManagedSelfSigned && runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		return errors.New("self-signed TLS check must run as the v3node service user (sudo -u v3node v3node check)")
+	}
 	renderer, err := engine.Select(cfg.Engine.Backend, compiled.Node)
 	if err != nil {
 		return err
 	}
 	if err := app.ValidateBackendPolicies(renderer.Name(), compiled.Users); err != nil {
 		return err
+	}
+	if err := app.EnsureManagedCertificate(compiled.Node); err != nil {
+		return fmt.Errorf("prepare managed TLS certificate: %w", err)
 	}
 	apiSecret, err := app.LoadOrCreateAPISecret(cfg.Engine.StateDir)
 	if err != nil {
@@ -257,25 +325,31 @@ func runDiagnose(args []string, stdout, stderr io.Writer) error {
 func runTune(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("tune", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	apply := flags.Bool("apply", false, "apply the reviewed host tuning profile")
+	legacyApply := flags.Bool("apply", false, "apply the reviewed host tuning profile")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if !*apply {
-		fmt.Fprintln(stdout, "No host settings changed.")
-		fmt.Fprintln(stdout, "Use 'v3node tune --apply' only after reviewing deploy/v3node-tune.")
-		return nil
+	action := "status"
+	if *legacyApply {
+		action = "apply"
+	}
+	if flags.NArg() > 1 {
+		return errors.New("tune accepts one of: status, apply, remove")
+	}
+	if flags.NArg() == 1 {
+		if *legacyApply {
+			return errors.New("do not combine tune --apply with a positional action")
+		}
+		action = flags.Arg(0)
+	}
+	if action != "status" && action != "apply" && action != "remove" {
+		return errors.New("tune accepts one of: status, apply, remove")
 	}
 	if runtime.GOOS != "linux" {
 		return errors.New("host tuning is supported only on Linux")
 	}
-	script := "/usr/local/lib/v3node/v3node-tune"
-	cmd := exec.Command(script, "--apply")
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("run %s: %w", script, err)
+	if err := executeAdminCommand(context.Background(), os.Stdin, stdout, stderr, tuningHelperPath, action); err != nil {
+		return fmt.Errorf("run %s: %w", tuningHelperPath, err)
 	}
 	return nil
 }
