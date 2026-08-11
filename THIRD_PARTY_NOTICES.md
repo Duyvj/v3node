@@ -128,6 +128,10 @@ hợp lệ theo GPL. Source bundle của **chính binary đã phát hành** tố
    của binary lẫn source archive;
 5. chỉ dẫn rõ artifact source nào tương ứng với từng binary/kiến trúc.
 
+Source bundle dùng dependency closure của đúng build tag Linux amd64/arm64 và
+được rebuild với module cache rỗng, `GOPROXY=off`. Module tùy chọn nằm sau build
+tag không bật và không được link vào binary không thuộc closure phát hành này.
+
 Không được chỉ đăng link tới upstream rồi bỏ phần patch/dependency source của
 binary thực tế. Không được xóa điều kiện đặt tên/association ở cuối license
 upstream. Vì điều kiện này có ảnh hưởng tới cách đặt tên artifact phái sinh,

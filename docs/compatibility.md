@@ -63,9 +63,10 @@ with a clear error and are never silently approximated.
 
 The pinned Xray v26.3.27 treats `trustedXForwardedFor` values as HTTP header
 names rather than CIDRs and trusts X-Forwarded-For unconditionally when the
-list is empty. v3node disables that implicit trust on WebSocket/XHTTP and
-rejects non-empty panel CIDR values until a newer engine version is pinned and
-tested. These values are not silently rendered with different semantics.
+list is empty. v3node disables that implicit trust on WebSocket, HTTPUpgrade,
+and XHTTP, and rejects non-empty panel CIDR values until a newer engine version
+is pinned and tested. These values are not silently rendered with different
+semantics.
 
 TLS `file` certificates are operator-managed. When the panel omits `cert_file`
 and `key_file`, the controller uses `/etc/v3node/<protocol><node-id>.cer` and
@@ -93,8 +94,11 @@ Both renderers intercept inbound client TCP/UDP port 53 and route it through the
 engine's configured DNS stack, matching the original node's resolver behavior.
 
 VLESS Encryption supports the pinned Xray `mlkem768x25519plus` grammar. Its
-mode, ticket, padding and authentication key are checked before rendering;
-ticket lifetime is capped at one hour to bound Xray's retained session state.
+mode, ticket, padding and canonical authentication key are checked before
+rendering. Padding components and delays are bounded. Ticket lifetime is capped
+at one hour to bound retention time, but the pinned Xray session map has no
+cardinality cap; `v3node check` warns for non-zero tickets and `0s` is the
+RAM-stable profile.
 `xtls-rprx-vision` is rejected outside TCP/raw plus TLS/REALITY unless VLESS
 Encryption is active. Shadowsocks 2022 server keys must decode to the exact key
 length required by the selected method.

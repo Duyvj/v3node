@@ -7,6 +7,9 @@ here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 readonly here
 project_root=$(unset CDPATH; cd -- "${here}/../.." && pwd)
 readonly project_root
+# Resolved from the script's canonical directory.
+# shellcheck disable=SC1091
+source "${project_root}/engine-patches/sing-box/UPSTREAM.env"
 
 [[ $# -eq 2 ]] || {
     printf 'Usage: %s ARCH OUTPUT_BINARY\n' "$0" >&2
@@ -32,16 +35,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bash "${here}/fetch-sing-box-source.sh" "${work_directory}/source"
-# Release binaries are built from the same vendored dependency layout shipped
-# in Corresponding Source. Besides enabling a fully offline rebuild, this keeps
-# Go's embedded module build information bit-for-bit consistent.
-(
-    cd "${work_directory}/source"
-    GOTOOLCHAIN=local go mod download
-    GOTOOLCHAIN=local go mod verify
-    GOTOOLCHAIN=local go mod vendor
-)
+bash "${here}/fetch-sing-box-source.sh" --apply-patch "${work_directory}/source"
+# Release binaries are built from the same linked-source vendor layout shipped
+# in Corresponding Source. Optional modules behind disabled sing-box build tags
+# are not part of the binary and are intentionally not downloaded or bundled.
+GOTOOLCHAIN=local go run -mod=readonly \
+    "${project_root}/scripts/release/linked_vendor.go" \
+    --source "${work_directory}/source" \
+    --tags "$SING_BOX_BUILD_TAGS"
 TARGET_GOOS=linux TARGET_GOARCH="$architecture" \
     bash "${project_root}/engine-patches/sing-box/build.sh" \
     "${work_directory}/source" \

@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -234,6 +235,11 @@ func ValidateSpec(node NodeSpec, users []UserSpec) error {
 			return errors.New("VLESS xtls-rprx-vision requires TCP/raw with TLS/Reality or VLESS Encryption")
 		}
 	}
+	if node.Protocol == "vless" && node.Encryption != "" && !strings.EqualFold(node.Encryption, "none") {
+		if _, err := xrayVLESSDecryption(node); err != nil {
+			return err
+		}
+	}
 	if node.Protocol != "vless" && node.Encryption != "" && !strings.EqualFold(node.Encryption, "none") {
 		return fmt.Errorf("protocol %s cannot use VLESS Encryption", node.Protocol)
 	}
@@ -299,9 +305,9 @@ func validateRealitySpec(node NodeSpec) error {
 	if strings.TrimSpace(spec.PrivateKey) != spec.PrivateKey {
 		return errors.New("Reality private key must not contain surrounding whitespace")
 	}
-	privateKey, err := base64.RawURLEncoding.DecodeString(spec.PrivateKey)
-	if err != nil || len(privateKey) != 32 {
-		return errors.New("Reality private key must be raw URL-safe base64 encoding of exactly 32 bytes")
+	privateKey, ok := decodeCanonicalRawURLBase64(spec.PrivateKey, 32)
+	if !ok {
+		return errors.New("Reality private key must be canonical raw URL-safe base64 encoding of exactly 32 bytes")
 	}
 	if spec.Xver > 2 {
 		return errors.New("Reality xver must be 0, 1, or 2")
@@ -358,15 +364,28 @@ func validateRealitySpec(node NodeSpec) error {
 		seenShortIDs[canonical] = struct{}{}
 	}
 	if spec.MLDSA65Seed != "" {
-		if spec.MLDSA65Seed == spec.PrivateKey {
-			return errors.New("Reality ML-DSA-65 seed must differ from the X25519 private key")
+		seed, ok := decodeCanonicalRawURLBase64(spec.MLDSA65Seed, 32)
+		if !ok {
+			return errors.New("Reality ML-DSA-65 seed must be canonical raw URL-safe base64 encoding of exactly 32 bytes")
 		}
-		seed, err := base64.RawURLEncoding.DecodeString(spec.MLDSA65Seed)
-		if err != nil || len(seed) != 32 {
-			return errors.New("Reality ML-DSA-65 seed must be raw URL-safe base64 encoding of exactly 32 bytes")
+		if bytes.Equal(seed, privateKey) {
+			return errors.New("Reality ML-DSA-65 seed must differ from the X25519 private key")
 		}
 	}
 	return nil
+}
+
+func decodeCanonicalRawURLBase64(value string, lengths ...int) ([]byte, bool) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != value {
+		return nil, false
+	}
+	for _, length := range lengths {
+		if len(decoded) == length {
+			return decoded, true
+		}
+	}
+	return nil, false
 }
 
 func validateRealityServerName(value string) error {
@@ -458,10 +477,31 @@ func SecurityWarnings(node NodeSpec) []string {
 	if node.Protocol == "shadowsocks" && node.TLS.Mode != "" && node.TLS.Mode != "none" {
 		warnings = append(warnings, "Xray Shadowsocks UDP does not inherit TCP transport TLS/REALITY camouflage; use a reviewed TCP-only deployment or a protocol designed for the required UDP path")
 	}
+	if node.Protocol == "vless" && node.Encryption != "" && !strings.EqualFold(node.Encryption, "none") {
+		var settings struct {
+			Ticket string `json:"ticket"`
+		}
+		if json.Unmarshal(node.EncryptionSettings, &settings) == nil && vlessTicketRetainsSessions(settings.Ticket) {
+			warnings = append(warnings, "non-zero VLESS Encryption tickets retain sessions in an upstream Xray map without a cardinality cap; use ticket 0s for the strongest RAM-stability profile")
+		}
+	}
 	if node.Protocol == "tuic" && node.ZeroRTT {
 		warnings = append(warnings, "TUIC zero-RTT is enabled and is replayable by design")
 	}
 	return warnings
+}
+
+func vlessTicketRetainsSessions(value string) bool {
+	if !strings.HasSuffix(value, "s") {
+		return false
+	}
+	for _, endpoint := range strings.Split(strings.TrimSuffix(value, "s"), "-") {
+		seconds, err := strconv.ParseInt(endpoint, 10, 32)
+		if err == nil && seconds > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRouteSpec(route RouteSpec) error {

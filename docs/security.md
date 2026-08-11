@@ -71,6 +71,13 @@ distribution. Xray distributions must preserve MPL-2.0 notices and identify a
 timely source location for the exact version. See
 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
+The sing-box source packager computes the dependency closure for the exact
+Linux amd64/arm64 build tags and includes that source under `vendor/`. It then
+rebuilds with `GOPROXY=off` and an empty module cache. Optional upstream modules
+behind disabled tags are not linked and are not copied merely because they
+appear in `go.mod`; `vendor/modules.txt` is the auditable package-to-module
+manifest for the released binary.
+
 ## Service isolation
 
 The supplied systemd unit applies an unprivileged service user, a minimal
@@ -139,11 +146,15 @@ when external TLS termination and network exposure have been independently
 verified.
 
 VLESS Encryption fields are validated against the pinned Xray grammar. Modes
-are limited to `native`, `xorpub`, or `random`; padding ranges are checked; and
-session tickets are limited to one hour because Xray retains per-session state
-for the ticket lifetime. A value of `0s` disables that retained 0-RTT state.
-Use the paired values produced by `xray vlessenc`; server-side changes cannot be
-made independently of subscription/client settings.
+are limited to `native`, `xorpub`, or `random`; padding tokens remain below the
+length at which Xray reinterprets them as keys; padding byte totals, component
+count, individual gaps, and total delay are bounded. Session tickets are
+limited to one hour, which bounds retention time but not the number of entries
+in Xray's upstream session map. A non-zero ticket therefore emits a warning;
+use `0s` for the strongest RAM-stability profile because it disables retained
+0-RTT session state. Use the paired values produced by `xray vlessenc`;
+server-side changes cannot be made independently of subscription/client
+settings.
 
 Shadowsocks 2022 server keys are validated at their exact method length and the
 `none` method is rejected. The per-user credential conversion remains identical
@@ -161,11 +172,12 @@ is a separate target-side PROXY protocol setting and is likewise reported.
 
 Xray v26.3.27 interprets `trustedXForwardedFor` entries as HTTP header names,
 not CIDRs, and trusts all X-Forwarded-For values when the list is empty. v3node
-therefore inserts an impossible header-name gate for WebSocket/XHTTP and rejects
-panel CIDR values until a newer pinned Xray version is separately audited. DNS
-queries from VPN users on both TCP and UDP port 53 are intercepted, but DNS
-routing protects resolver consistency/privacy only; it does not change the
-client fingerprint or prevent GFW classification.
+therefore inserts an impossible header-name gate for WebSocket, HTTPUpgrade,
+and XHTTP, and rejects panel CIDR values until a newer pinned Xray version is
+separately audited. DNS queries from VPN users on both TCP and UDP port 53 are
+intercepted. A matcherless panel resolver is marked `finalQuery` so a failure
+does not silently fall back to another locality, but DNS policy still cannot
+change the client fingerprint or prevent GFW classification.
 
 uTLS fingerprint selection, TLS fragmentation, record fragmentation, and TLS
 spoofing are client-side features. Adding those fields to an inbound would not

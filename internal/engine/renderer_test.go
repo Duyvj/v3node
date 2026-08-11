@@ -208,6 +208,7 @@ func TestValidateSpecRejectsMalformedRealitySecurity(t *testing.T) {
 		mutate func(*NodeSpec)
 	}{
 		{name: "private key", mutate: func(node *NodeSpec) { node.TLS.PrivateKey = "not-a-key" }},
+		{name: "noncanonical private key", mutate: func(node *NodeSpec) { node.TLS.PrivateKey = strings.TrimSuffix(testRealityPrivateKey, "U") + "V" }},
 		{name: "missing server names", mutate: func(node *NodeSpec) { node.TLS.ServerName = ""; node.TLS.ServerNames = nil }},
 		{name: "wildcard server name", mutate: func(node *NodeSpec) { node.TLS.ServerName = "*.example.com"; node.TLS.ServerNames = nil }},
 		{name: "duplicate server names", mutate: func(node *NodeSpec) { node.TLS.ServerNames = []string{"edge.example", "EDGE.EXAMPLE"} }},
@@ -219,6 +220,7 @@ func TestValidateSpecRejectsMalformedRealitySecurity(t *testing.T) {
 		{name: "destination URL", mutate: func(node *NodeSpec) { node.TLS.DestinationHost = "https://example.com" }},
 		{name: "listener loop", mutate: func(node *NodeSpec) { node.Listen = "127.0.0.1"; node.TLS.DestinationHost = "127.0.0.1" }},
 		{name: "invalid ML-DSA seed", mutate: func(node *NodeSpec) { node.TLS.MLDSA65Seed = "bad-seed" }},
+		{name: "noncanonical ML-DSA seed", mutate: func(node *NodeSpec) { node.TLS.MLDSA65Seed = strings.TrimSuffix(testMLDSA65Seed, "A") + "B" }},
 		{name: "reused ML-DSA seed", mutate: func(node *NodeSpec) { node.TLS.MLDSA65Seed = node.TLS.PrivateKey }},
 		{name: "invalid xver", mutate: func(node *NodeSpec) { node.TLS.Xver = 3 }},
 	}
@@ -264,6 +266,15 @@ func TestSecurityWarningsExposeOperationalAntiGFWRisks(t *testing.T) {
 	warnings = strings.Join(SecurityWarnings(node), "\n")
 	if !strings.Contains(warnings, "inbound PROXY protocol") || !strings.Contains(warnings, "Shadowsocks UDP") {
 		t.Fatalf("missing PROXY/UDP security warnings: %q", warnings)
+	}
+
+	node = NodeSpec{
+		Protocol:           "vless",
+		Encryption:         "mlkem768x25519plus",
+		EncryptionSettings: json.RawMessage(`{"mode":"native","ticket":"600s","private_key":"` + testVLESSEncryptionKey + `"}`),
+	}
+	if warnings := strings.Join(SecurityWarnings(node), "\n"); !strings.Contains(warnings, "without a cardinality cap") {
+		t.Fatalf("missing VLESS session-retention warning: %q", warnings)
 	}
 }
 
@@ -504,17 +515,20 @@ func TestXrayStreamKeepsTransportSecurityWithEmptySettings(t *testing.T) {
 }
 
 func TestXrayDisablesImplicitForwardedForTrust(t *testing.T) {
-	node := NodeSpec{Protocol: "vless", Port: 443, Transport: "ws", TLS: TLSSpec{Mode: "none"}}
-	stream, err := xrayStream(node)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sockopt := stream["sockopt"].(map[string]any)
-	headers, ok := sockopt["trustedXForwardedFor"].([]string)
-	if !ok || len(headers) != 1 || headers[0] != xrayDisabledForwardedForHeader {
-		t.Fatalf("implicit XFF trust was not disabled: %#v", stream)
+	for _, transport := range []string{"ws", "httpupgrade", "xhttp"} {
+		node := NodeSpec{Protocol: "vless", Port: 443, Transport: transport, TLS: TLSSpec{Mode: "none"}}
+		stream, err := xrayStream(node)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sockopt := stream["sockopt"].(map[string]any)
+		headers, ok := sockopt["trustedXForwardedFor"].([]string)
+		if !ok || len(headers) != 1 || headers[0] != xrayDisabledForwardedForHeader {
+			t.Fatalf("implicit XFF trust was not disabled for %s: %#v", transport, stream)
+		}
 	}
 
+	node := NodeSpec{Protocol: "vless", Port: 443, Transport: "ws", TLS: TLSSpec{Mode: "none"}}
 	node.TrustedXForwardedFor = []string{"192.0.2.0/24"}
 	if _, err := Select("xray", node); err == nil {
 		t.Fatal("pinned Xray accepted unsupported CIDR trusted XFF")
@@ -626,10 +640,12 @@ func TestXrayVLESSEncryptionRejectsMalformedComponents(t *testing.T) {
 		`{"mode":"native","ticket":"600","private_key":"` + testVLESSEncryptionKey + `"}`,
 		`{"mode":"native","ticket":"3601s","private_key":"` + testVLESSEncryptionKey + `"}`,
 		`{"mode":"native","ticket":"500-100s","private_key":"` + testVLESSEncryptionKey + `"}`,
-		`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.75-0-111","private_key":"` + testVLESSEncryptionKey + `"}`,
 		`{"mode":"native","ticket":"600s","server_padding":"99-111-1111","private_key":"` + testVLESSEncryptionKey + `"}`,
 		`{"mode":"native","ticket":"600s","server_padding":"100-100-50","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.75-00000000000000-111","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.100-0-1001.50-0-3333","private_key":"` + testVLESSEncryptionKey + `"}`,
 		`{"mode":"native","ticket":"600s","private_key":"bad"}`,
+		`{"mode":"native","ticket":"600s","private_key":"` + strings.TrimSuffix(testVLESSEncryptionKey, "M") + `N"}`,
 		`{"mode":"native","ticket":"600s","private_key":"` + testVLESSEncryptionKey + `","unknown":true}`,
 	}
 	for _, settings := range tests {
@@ -643,15 +659,26 @@ func TestXrayVLESSEncryptionRejectsMalformedComponents(t *testing.T) {
 	if _, err := xrayVLESSDecryption(node); err != nil {
 		t.Fatalf("valid stateless VLESS encryption was rejected: %v", err)
 	}
+	node.EncryptionSettings = json.RawMessage(`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.75-0-111","private_key":"` + testVLESSEncryptionKey + `"}`)
+	if _, err := xrayVLESSDecryption(node); err != nil {
+		t.Fatalf("valid even-component VLESS padding was rejected: %v", err)
+	}
+	if err := validateVLESSPadding(strings.Repeat("100-35-35.", maxVLESSPaddingComponents) + "100-35-35"); err == nil {
+		t.Fatal("VLESS padding component bound was not enforced")
+	}
 }
 
-func TestXrayMatcherlessPanelDNSBecomesFallbackResolver(t *testing.T) {
+func TestXrayMatcherlessPanelDNSBecomesFinalResolver(t *testing.T) {
 	_, dns, _, err := xrayRoutes([]RouteSpec{{ID: 7, Action: "dns", ActionValue: "https://dns.example/dns-query"}}, false, nil, "prefer_ipv4")
 	if err != nil {
 		t.Fatal(err)
 	}
 	servers := dns["servers"].([]any)
-	if len(servers) != 1 || servers[0] != "https://dns.example/dns-query" {
+	if len(servers) != 1 {
+		t.Fatalf("matcherless panel DNS is not the only default resolver: %#v", servers)
+	}
+	server, ok := servers[0].(map[string]any)
+	if !ok || server["address"] != "https://dns.example/dns-query" || server["finalQuery"] != true {
 		t.Fatalf("matcherless panel DNS is not the default resolver: %#v", servers)
 	}
 	if _, _, _, err := xrayRoutes([]RouteSpec{

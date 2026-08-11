@@ -25,6 +25,7 @@ func TestXrayOfficialBinary(t *testing.T) {
 			Encryption:         "mlkem768x25519plus",
 			EncryptionSettings: json.RawMessage(`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.75-0-111.50-0-3333","private_key":"0B7MUsfiVdKqBK20cdhgsBnJyaz-XXrR3qal7rSVHFM"}`),
 			TLS:                TLSSpec{Mode: "none"},
+			Routes:             []RouteSpec{{ID: 2, Action: "dns", ActionValue: "1.1.1.1"}},
 		},
 		{
 			Protocol: "vless", Listen: "127.0.0.1", Port: 21006, Transport: "tcp",

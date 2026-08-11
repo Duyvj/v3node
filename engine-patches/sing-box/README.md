@@ -27,6 +27,9 @@ binary actually shipped. That archive includes the fully patched upstream tree,
 all Go module source linked into the binary (vendored for offline availability),
 license/notice/patent files, `go.mod`, `go.sum`, both patches, build tags, build and
 installation scripts, and hashes mapping source to every binary architecture.
+The release helper enumerates the Linux amd64/arm64 dependency closure under
+the exact build tags and verifies an offline rebuild. Optional modules behind
+disabled upstream tags (for example Cronet) are neither linked nor bundled.
 Publishing only the upstream URL plus these patches is not the complete release
 procedure. See [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md) and the
 full [`GPL-3.0.txt`](../../LICENSES/GPL-3.0.txt) before distribution.

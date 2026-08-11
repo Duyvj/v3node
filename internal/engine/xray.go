@@ -24,6 +24,9 @@ var customOutboundProtocolPattern = regexp.MustCompile(`^[a-z][a-z0-9_.+-]{0,63}
 const (
 	xrayDisabledForwardedForHeader = "@v3node-disabled"
 	maxVLESSSessionTicketSeconds   = 3600
+	maxVLESSPaddingComponents      = 15
+	maxVLESSPaddingGapMilliseconds = 1000
+	maxVLESSPaddingTotalGapMillis  = 3000
 )
 
 type xrayClientConfig struct {
@@ -279,9 +282,8 @@ func xrayVLESSDecryption(node NodeSpec) (string, error) {
 	if settings.PrivateKey == "" || strings.Contains(settings.PrivateKey, ".") || strings.TrimSpace(settings.PrivateKey) != settings.PrivateKey {
 		return "", errors.New("VLESS encryption private_key is empty or ambiguous")
 	}
-	privateKey, err := base64.RawURLEncoding.DecodeString(settings.PrivateKey)
-	if err != nil || (len(privateKey) != 32 && len(privateKey) != 64) {
-		return "", errors.New("VLESS encryption private_key must be raw URL-safe base64 encoding of a 32-byte X25519 key or 64-byte ML-KEM seed")
+	if _, ok := decodeCanonicalRawURLBase64(settings.PrivateKey, 32, 64); !ok {
+		return "", errors.New("VLESS encryption private_key must be canonical raw URL-safe base64 encoding of a 32-byte X25519 key or 64-byte ML-KEM seed")
 	}
 	parts := []string{encryption, settings.Mode, settings.Ticket}
 	if settings.ServerPadding != "" {
@@ -318,11 +320,17 @@ func validateVLESSPadding(value string) error {
 		return nil
 	}
 	blocks := strings.Split(value, ".")
-	if len(blocks)%2 == 0 {
-		return errors.New("VLESS encryption padding must alternate padding.delay and end with padding")
+	if len(blocks) > maxVLESSPaddingComponents {
+		return fmt.Errorf("VLESS encryption padding has more than %d components", maxVLESSPaddingComponents)
 	}
 	var maximumPadding int64
+	var maximumDelay int64
 	for index, block := range blocks {
+		// Xray v26.3.27 classifies every dot component of 20 or more
+		// characters as a cryptographic key rather than as padding metadata.
+		if len(block) >= 20 {
+			return fmt.Errorf("VLESS encryption padding block %d must be shorter than 20 characters", index)
+		}
 		parts := strings.Split(block, "-")
 		if len(parts) != 3 {
 			return fmt.Errorf("VLESS encryption padding block %d must contain probability-min-max", index)
@@ -345,6 +353,14 @@ func validateVLESSPadding(value string) error {
 			maximumPadding += values[2]
 			if maximumPadding > 65_553 {
 				return errors.New("VLESS encryption total maximum padding exceeds 65553 bytes")
+			}
+		} else {
+			if values[2] > maxVLESSPaddingGapMilliseconds {
+				return fmt.Errorf("VLESS encryption padding gap %d exceeds %d milliseconds", index, maxVLESSPaddingGapMilliseconds)
+			}
+			maximumDelay += values[2]
+			if maximumDelay > maxVLESSPaddingTotalGapMillis {
+				return fmt.Errorf("VLESS encryption total maximum padding delay exceeds %d milliseconds", maxVLESSPaddingTotalGapMillis)
 			}
 		}
 	}
@@ -429,10 +445,11 @@ func xrayStream(node NodeSpec) (map[string]any, error) {
 	if len(node.TrustedXForwardedFor) > 0 {
 		return nil, errors.New("pinned Xray 26.3.27 cannot safely enforce CIDR trusted_x_forwarded_for")
 	}
-	if method == "websocket" || method == "xhttp" {
+	if method == "websocket" || method == "httpupgrade" || method == "xhttp" {
 		// Xray 26.3.27 trusts every X-Forwarded-For value when this list is
-		// empty. Gate it on an HTTP-impossible header name so direct clients
-		// cannot spoof their source address. CIDR trust was added only later.
+		// empty. Gate WebSocket, HTTPUpgrade, and XHTTP on an HTTP-impossible
+		// header name so direct clients cannot spoof their source address. CIDR
+		// trust was added only later.
 		sockopt["trustedXForwardedFor"] = []string{xrayDisabledForwardedForHeader}
 	}
 	if len(sockopt) > 0 {
@@ -573,7 +590,10 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 				// A matcherless panel rule is the default resolver, not a
 				// skipFallback server with an empty domain matcher (which Xray
 				// never selects). Put it before local fallback resolvers.
-				dnsServers = append([]any{route.ActionValue}, dnsServers...)
+				dnsServers = append([]any{map[string]any{
+					"address":    route.ActionValue,
+					"finalQuery": true,
+				}}, dnsServers...)
 				hasPanelDefaultDNS = true
 				hasFallbackDNS = true
 				continue

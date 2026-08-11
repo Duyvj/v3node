@@ -47,12 +47,10 @@ trap cleanup EXIT
 
 bash "${here}/fetch-sing-box-source.sh" --apply-patch "${work_directory}/${archive_root}"
 readonly source_directory=${work_directory}/${archive_root}
-(
-    cd "$source_directory"
-    GOTOOLCHAIN=local go mod download
-    GOTOOLCHAIN=local go mod verify
-    GOTOOLCHAIN=local go mod vendor
-)
+GOTOOLCHAIN=local go run -mod=readonly \
+    "${project_root}/scripts/release/linked_vendor.go" \
+    --source "$source_directory" \
+    --tags "$SING_BOX_BUILD_TAGS"
 [[ -f ${source_directory}/vendor/modules.txt ]] || {
     printf 'vendored module manifest was not created\n' >&2
     exit 1
@@ -82,10 +80,15 @@ install -m 0644 \
 install -m 0755 \
     "${project_root}/engine-patches/sing-box/build.sh" \
     "${source_directory}/V3NODE-PATCHES/build.sh"
+install -m 0644 \
+    "${project_root}/scripts/release/linked_vendor.go" \
+    "${source_directory}/V3NODE-PATCHES/linked_vendor.go"
 patch_one_sha256=$(sha256sum "${project_root}/engine-patches/sing-box/0001-expose-authenticated-user.patch" | awk '{print $1}')
 readonly patch_one_sha256
 patch_two_sha256=$(sha256sum "${project_root}/engine-patches/sing-box/0002-bounded-user-rate-limit.patch" | awk '{print $1}')
 readonly patch_two_sha256
+linked_vendor_sha256=$(sha256sum "${project_root}/scripts/release/linked_vendor.go" | awk '{print $1}')
+readonly linked_vendor_sha256
 {
     printf 'Upstream: https://github.com/SagerNet/sing-box\n'
     printf 'Version: %s\n' "$SING_BOX_VERSION"
@@ -94,9 +97,10 @@ readonly patch_two_sha256
     printf 'Upstream source SHA256: %s\n' "$SING_BOX_SOURCE_SHA256"
     printf 'Patch 0001 SHA256: %s\n' "$patch_one_sha256"
     printf 'Patch 0002 SHA256: %s\n' "$patch_two_sha256"
+    printf 'Linked vendor builder SHA256: %s\n' "$linked_vendor_sha256"
     printf 'Build tags: %s\n' "$SING_BOX_BUILD_TAGS"
     printf 'Release Go version: %s\n' "$V3NODE_RELEASE_GO_VERSION"
-    printf 'Module source: vendor/ (generated from pinned go.mod and go.sum)\n'
+    printf 'Module source: vendor/ (exact linux/amd64+arm64 release dependency closure)\n'
 } >"${source_directory}/V3NODE-BUILD-METADATA.txt"
 
 find "$source_directory" -type d -exec chmod 0755 {} +

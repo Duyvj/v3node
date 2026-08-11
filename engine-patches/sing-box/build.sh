@@ -88,11 +88,15 @@ trap cleanup EXIT
     if [[ $module_mode == 'readonly' ]]; then
         GOTOOLCHAIN=local go mod verify
     fi
-    env -u GOOS -u GOARCH CGO_ENABLED=1 GOTOOLCHAIN=local go test \
-        -mod="$module_mode" \
-        -tags "$SING_BOX_BUILD_TAGS" \
-        ./experimental/clashapi/trafficontrol \
-        ./experimental/v3node
+    if [[ $(go env GOOS) == "$target_goos" ]]; then
+        env -u GOOS -u GOARCH CGO_ENABLED=0 GOTOOLCHAIN=local go test \
+            -mod="$module_mode" \
+            -tags "$SING_BOX_BUILD_TAGS" \
+            ./experimental/clashapi/trafficontrol \
+            ./experimental/v3node
+    else
+        printf 'cross-host build: runtime patch tests are validated separately\n'
+    fi
 
     shared_ldflags=$(<release/LDFLAGS)
     readonly shared_ldflags

@@ -284,6 +284,11 @@ jobs:
             | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p2-source/V3NODE-BUILD-METADATA.txt" >/dev/null
           tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz" \
             | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p2-source/vendor/modules.txt" >/dev/null
+          source_size=$(stat --format='%s' "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz")
+          (( source_size > 0 && source_size <= 536870912 )) || {
+            printf 'corresponding source archive exceeds the reviewed 512 MiB bound\n' >&2
+            exit 1
+          }
 
       - name: Rebuild packaged source without module downloads
         run: |
