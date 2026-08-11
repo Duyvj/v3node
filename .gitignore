@@ -1,0 +1,12 @@
+/bin/
+/dist/
+/coverage/
+*.test
+*.out
+*.log
+.vscode/
+.idea/
+/.gocache/
+/.gomodcache/
+/.cache/
+/.release-test/

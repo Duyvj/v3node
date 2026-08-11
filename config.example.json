@@ -1,0 +1,40 @@
+{
+  "panel": {
+    "url": "https://panel.example.com",
+    "node_id": 1,
+    "token_file": "/etc/v3node/panel.token",
+    "allow_insecure_http": false
+  },
+  "engine": {
+    "backend": "auto",
+    "sing_box_binary": "/usr/local/lib/v3node/edge-engine",
+    "xray_binary": "/usr/local/lib/v3node/xray",
+    "state_dir": "/var/lib/v3node",
+    "stats_listen": "127.0.0.1:10085",
+    "clash_listen": "127.0.0.1:10086",
+    "check_timeout": "10s",
+    "stop_timeout": "20s"
+  },
+  "runtime": {
+    "log_level": "info",
+    "http_timeout": "15s",
+    "stats_interval": "5s",
+    "pull_interval_min": "15s",
+    "pull_interval_max": "1h",
+    "push_interval_min": "15s",
+    "push_interval_max": "1h",
+    "max_config_bytes": 2097152,
+    "max_user_response_bytes": 33554432,
+    "max_users": 100000,
+    "max_online_ips": 200000,
+    "max_ips_per_user": 32,
+    "online_ip_ttl": "3m",
+    "max_panel_payload_bytes": 33554432,
+    "max_stats_response_bytes": 67108864
+  },
+  "network": {
+    "dns_servers": [],
+    "address_strategy": "auto",
+    "block_private": true
+  }
+}

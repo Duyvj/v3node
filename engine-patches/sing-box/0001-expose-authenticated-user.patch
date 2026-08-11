@@ -1,0 +1,11 @@
+diff --git a/experimental/clashapi/trafficontrol/tracker.go b/experimental/clashapi/trafficontrol/tracker.go
+--- a/experimental/clashapi/trafficontrol/tracker.go
++++ b/experimental/clashapi/trafficontrol/tracker.go
+@@ -64,6 +64,7 @@ func (t TrackerMetadata) MarshalJSON() ([]byte, error) {
+ 		"id": t.ID,
+ 		"metadata": map[string]any{
+ 			"network":         t.Metadata.Network,
++			"user":            t.Metadata.User,
+ 			"type":            inbound,
+ 			"sourceIP":        t.Metadata.Source.Addr,
+ 			"destinationIP":   t.Metadata.Destination.Addr,

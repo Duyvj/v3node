@@ -1,0 +1,17 @@
+* text=auto
+.gitattributes text eol=lf
+
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.service text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.env text eol=lf
+deploy/v3node-tune text eol=lf
+engine-patches/sing-box/UPSTREAM_LICENSE text eol=lf
+engine-patches/**/*.patch text eol=lf whitespace=-space-before-tab
