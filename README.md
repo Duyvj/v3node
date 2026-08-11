@@ -57,12 +57,14 @@ Controller dùng các endpoint panel sau và luôn giữ `node_type=v2node`:
 
 | Engine | Protocol | Transport chính |
 | --- | --- | --- |
-| sing-box 1.13.12 bản build của dự án | VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS | TCP/raw, WebSocket, gRPC, HTTPUpgrade, HTTP; tùy protocol |
+| sing-box 1.13.18 bản build của dự án | VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS | TCP/raw, WebSocket, gRPC, HTTPUpgrade, HTTP; tùy protocol |
 | Xray v26.3.27 nguyên bản | VMess, VLESS, Trojan, Shadowsocks | TCP/raw, WebSocket, gRPC, HTTPUpgrade, XHTTP/SplitHTTP |
 
 `engine.backend: "auto"` ưu tiên sing-box cho cấu hình thông thường và chọn Xray
-khi cần XHTTP/SplitHTTP, xử lý `trusted_x_forwarded_for` hoặc route dùng cú pháp
-GeoIP/GeoSite/custom outbound của Xray. Custom outbound được giới hạn 256 KiB,
+khi cần XHTTP/SplitHTTP, TLS cho Shadowsocks TCP hoặc route dùng cú pháp
+GeoIP/GeoSite/custom outbound của Xray. Xray v26.3.27 chưa thực thi CIDR
+`trusted_x_forwarded_for` an toàn nên v3node từ chối trường này thay vì âm thầm
+tin địa chỉ do client tự khai. Custom outbound được giới hạn 256 KiB,
 chỉ nhận các field đã duyệt và không được dùng tag nội bộ. Một cấu hình không
 thể biểu diễn chính xác trên engine được chọn sẽ bị từ chối thay vì bị chuyển
 đổi âm thầm.
@@ -78,6 +80,30 @@ và `.key`. `cert_mode=self` được tạo một lần bằng ECDSA trong
 `/var/lib/v3node/certificates/`, không cần worker chạy nền. Bản beta chưa nhận
 secret DNS từ panel để tự chạy ACME `dns`/`http`. `tls=1` cùng `cert_mode=none`
 giữ đúng hợp đồng TLS termination bên ngoài. Reality không dùng các file cert.
+
+## Chống GFW và giảm rủi ro block IP
+
+v3node kiểm tra key X25519, ML-DSA seed, SNI, short ID và destination của
+REALITY trước khi ghi cấu hình engine; key lỗi không còn bị Xray in nguyên giá
+trị vào journal. Cả hai engine dùng cửa sổ lệch thời gian REALITY 5 phút, vì vậy
+VPS và thiết bị khách phải đồng bộ giờ. TLS certificate trên sing-box và Xray
+đều có phiên bản tối thiểu 1.2. DNS TCP/UDP cổng 53 từ client đều được đưa qua
+DNS stack của VPS.
+
+Với node dành cho mạng Trung Quốc, profile nên ưu tiên VLESS + TCP/raw +
+REALITY trên cổng ngoài 443; `flow=xtls-rprx-vision` chỉ được nhận ở tổ hợp mà
+engine thực sự hỗ trợ. Không dùng Apple/iCloud làm target/SNI. Target cần có
+TLS/SAN phù hợp và nên ở cùng ASN với VPS; kiểm tra thực tế bằng `xray tls ping`.
+Nếu dùng ML-DSA, còn phải kiểm tra certificate target đủ lớn và hỗ trợ trao đổi
+khóa phù hợp. `v3node check` và service log sẽ cảnh báo cổng REALITY khác 443,
+short ID rỗng, TLS tự ký, listener không có TLS/REALITY và TUIC zero-RTT.
+
+Fingerprint uTLS/ClientHello, fragmentation và `spoof` nằm ở phía client;
+server v3node không thể ép các app khách dùng fingerprint đúng. TLS tự ký,
+VLESS/Trojan plaintext hoặc Shadowsocks mở trực tiếp không tạo được diện mạo
+HTTPS bình thường. Không protocol/cấu hình nào bảo đảm IP sẽ không bao giờ bị
+GFW chặn; production vẫn cần IP/node dự phòng và kiểm tra từ mạng Trung Quốc.
+Xem thêm phần vận hành trong [mô hình bảo mật](docs/security.md#anti-gfw-and-traffic-camouflage).
 
 Các trạng thái cần hiểu rõ trong beta:
 

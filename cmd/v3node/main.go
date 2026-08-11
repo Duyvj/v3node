@@ -254,6 +254,9 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	for _, warning := range engine.SecurityWarnings(compiled.Node) {
+		fmt.Fprintf(stderr, "v3node: security warning: %s\n", warning)
+	}
 	if compiled.Node.TLS.ManagedSelfSigned && runtime.GOOS == "linux" && os.Geteuid() == 0 {
 		return errors.New("self-signed TLS check must run as the v3node service user (sudo -u v3node v3node check)")
 	}

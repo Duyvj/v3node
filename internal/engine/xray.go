@@ -21,6 +21,11 @@ type XrayRenderer struct{}
 var customOutboundTagPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 var customOutboundProtocolPattern = regexp.MustCompile(`^[a-z][a-z0-9_.+-]{0,63}$`)
 
+const (
+	xrayDisabledForwardedForHeader = "@v3node-disabled"
+	maxVLESSSessionTicketSeconds   = 3600
+)
+
 type xrayClientConfig struct {
 	Email    string `json:"email"`
 	Level    int    `json:"level"`
@@ -33,6 +38,9 @@ type xrayClientConfig struct {
 func (XrayRenderer) Name() string { return "xray" }
 
 func (XrayRenderer) Supports(node NodeSpec) error {
+	if len(node.TrustedXForwardedFor) > 0 {
+		return errors.New("pinned Xray 26.3.27 cannot safely enforce CIDR trusted_x_forwarded_for; leave it empty")
+	}
 	switch node.Protocol {
 	case "vmess", "vless", "trojan", "shadowsocks":
 	default:
@@ -245,13 +253,35 @@ func xrayVLESSDecryption(node NodeSpec) (string, error) {
 		ServerPadding string `json:"server_padding"`
 		PrivateKey    string `json:"private_key"`
 	}
-	if err := json.Unmarshal(node.EncryptionSettings, &settings); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(node.EncryptionSettings)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&settings); err != nil {
 		return "", fmt.Errorf("decode VLESS encryption settings: %w", err)
 	}
-	for _, component := range []string{settings.Mode, settings.Ticket, settings.PrivateKey} {
-		if component == "" || strings.Contains(component, ".") {
-			return "", errors.New("VLESS encryption settings contain an empty or ambiguous component")
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", errors.New("VLESS encryption settings contain multiple JSON values")
 		}
+		return "", fmt.Errorf("decode trailing VLESS encryption settings: %w", err)
+	}
+	switch settings.Mode {
+	case "native", "xorpub", "random":
+	default:
+		return "", errors.New("VLESS encryption mode must be native, xorpub, or random")
+	}
+	if err := validateVLESSServerTicket(settings.Ticket); err != nil {
+		return "", err
+	}
+	if err := validateVLESSPadding(settings.ServerPadding); err != nil {
+		return "", err
+	}
+	if settings.PrivateKey == "" || strings.Contains(settings.PrivateKey, ".") || strings.TrimSpace(settings.PrivateKey) != settings.PrivateKey {
+		return "", errors.New("VLESS encryption private_key is empty or ambiguous")
+	}
+	privateKey, err := base64.RawURLEncoding.DecodeString(settings.PrivateKey)
+	if err != nil || (len(privateKey) != 32 && len(privateKey) != 64) {
+		return "", errors.New("VLESS encryption private_key must be raw URL-safe base64 encoding of a 32-byte X25519 key or 64-byte ML-KEM seed")
 	}
 	parts := []string{encryption, settings.Mode, settings.Ticket}
 	if settings.ServerPadding != "" {
@@ -259,6 +289,66 @@ func xrayVLESSDecryption(node NodeSpec) (string, error) {
 	}
 	parts = append(parts, settings.PrivateKey)
 	return strings.Join(parts, "."), nil
+}
+
+func validateVLESSServerTicket(value string) error {
+	if value == "" || strings.TrimSpace(value) != value || !strings.HasSuffix(value, "s") {
+		return errors.New("VLESS encryption ticket must use seconds, for example 600s or 100-500s")
+	}
+	parts := strings.Split(strings.TrimSuffix(value, "s"), "-")
+	if len(parts) < 1 || len(parts) > 2 {
+		return errors.New("VLESS encryption ticket must use 600s or 100-500s syntax")
+	}
+	seconds := make([]int64, len(parts))
+	for index, part := range parts {
+		parsed, err := strconv.ParseInt(part, 10, 32)
+		if err != nil || parsed < 0 || parsed > maxVLESSSessionTicketSeconds {
+			return fmt.Errorf("VLESS encryption ticket endpoint must be between 0 and %d seconds", maxVLESSSessionTicketSeconds)
+		}
+		seconds[index] = parsed
+	}
+	if len(seconds) == 2 && seconds[0] > seconds[1] {
+		return errors.New("VLESS encryption ticket range minimum exceeds maximum")
+	}
+	return nil
+}
+
+func validateVLESSPadding(value string) error {
+	if value == "" {
+		return nil
+	}
+	blocks := strings.Split(value, ".")
+	if len(blocks)%2 == 0 {
+		return errors.New("VLESS encryption padding must alternate padding.delay and end with padding")
+	}
+	var maximumPadding int64
+	for index, block := range blocks {
+		parts := strings.Split(block, "-")
+		if len(parts) != 3 {
+			return fmt.Errorf("VLESS encryption padding block %d must contain probability-min-max", index)
+		}
+		values := [3]int64{}
+		for valueIndex, part := range parts {
+			parsed, err := strconv.ParseInt(part, 10, 32)
+			if err != nil || parsed < 0 {
+				return fmt.Errorf("VLESS encryption padding block %d contains an invalid non-negative integer", index)
+			}
+			values[valueIndex] = parsed
+		}
+		if values[0] > 100 || values[1] > values[2] {
+			return fmt.Errorf("VLESS encryption padding block %d has an invalid probability or range", index)
+		}
+		if index == 0 && (values[0] != 100 || values[1] < 35 || values[2] < 35) {
+			return errors.New("VLESS encryption first padding block must have probability 100 and lengths of at least 35 bytes")
+		}
+		if index%2 == 0 {
+			maximumPadding += values[2]
+			if maximumPadding > 65_553 {
+				return errors.New("VLESS encryption total maximum padding exceeds 65553 bytes")
+			}
+		}
+	}
+	return nil
 }
 
 func xrayLogLevel(value string) string {
@@ -311,23 +401,44 @@ func xrayStream(node NodeSpec) (map[string]any, error) {
 		method = "xhttp"
 	}
 	stream := map[string]any{"method": method, "security": "none"}
-	sockopt := make(map[string]any)
-	if acceptsProxyProtocol(node.TransportSettings) {
-		sockopt["acceptProxyProtocol"] = true
-	}
-	if len(node.TrustedXForwardedFor) > 0 {
-		sockopt["trustedXForwardedFor"] = node.TrustedXForwardedFor
-	}
-	if len(sockopt) > 0 {
-		stream["sockopt"] = sockopt
-	}
+	settings := make(map[string]any)
 	if len(node.TransportSettings) > 0 {
-		var settings map[string]any
 		decoder := json.NewDecoder(strings.NewReader(string(node.TransportSettings)))
 		decoder.UseNumber()
 		if err := decoder.Decode(&settings); err != nil {
 			return nil, fmt.Errorf("decode Xray transport settings: %w", err)
 		}
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return nil, errors.New("Xray transport settings contain multiple JSON values")
+			}
+			return nil, fmt.Errorf("decode trailing Xray transport settings: %w", err)
+		}
+	}
+	sockopt := make(map[string]any)
+	if value, exists := settings["acceptProxyProtocol"]; exists {
+		accept, ok := value.(bool)
+		if !ok {
+			return nil, errors.New("Xray acceptProxyProtocol must be boolean")
+		}
+		if accept {
+			sockopt["acceptProxyProtocol"] = true
+		}
+	}
+	if len(node.TrustedXForwardedFor) > 0 {
+		return nil, errors.New("pinned Xray 26.3.27 cannot safely enforce CIDR trusted_x_forwarded_for")
+	}
+	if method == "websocket" || method == "xhttp" {
+		// Xray 26.3.27 trusts every X-Forwarded-For value when this list is
+		// empty. Gate it on an HTTP-impossible header name so direct clients
+		// cannot spoof their source address. CIDR trust was added only later.
+		sockopt["trustedXForwardedFor"] = []string{xrayDisabledForwardedForHeader}
+	}
+	if len(sockopt) > 0 {
+		stream["sockopt"] = sockopt
+	}
+	if len(settings) > 0 {
 		key := map[string]string{
 			"raw":         "rawSettings",
 			"websocket":   "wsSettings",
@@ -371,6 +482,7 @@ func xrayStream(node NodeSpec) (map[string]any, error) {
 			"serverNames": serverNames,
 			"privateKey":  node.TLS.PrivateKey,
 			"shortIds":    node.TLS.ShortIDs,
+			"maxTimeDiff": realityMaxTimeDifference(node.TLS).Milliseconds(),
 		}
 		reality := stream["realitySettings"].(map[string]any)
 		if node.TLS.Xver != 0 {
@@ -412,6 +524,8 @@ func xrayShadowsocksRawSettings(settings map[string]any) map[string]any {
 func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, addressStrategy string) ([]map[string]any, map[string]any, []any, error) {
 	rules := make([]map[string]any, 0, len(routes)+1)
 	dnsServers := make([]any, 0, len(configuredDNS)+1)
+	hasFallbackDNS := false
+	hasPanelDefaultDNS := false
 	customOutbounds := make([]any, 0)
 	customByTag := make(map[string]map[string]any)
 	for _, server := range configuredDNS {
@@ -419,11 +533,7 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 			return nil, nil, nil, errors.New("configured DNS server is empty")
 		}
 		dnsServers = append(dnsServers, server)
-	}
-	if len(dnsServers) == 0 {
-		// Resolving through the VPS resolver keeps DNS egress in the VPS region
-		// instead of leaking the controller host's or client's resolver.
-		dnsServers = append(dnsServers, "localhost")
+		hasFallbackDNS = true
 	}
 	if blockPrivate {
 		rules = append(rules, map[string]any{
@@ -455,6 +565,18 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 		case "dns":
 			if route.ActionValue == "" {
 				return nil, nil, nil, fmt.Errorf("DNS route %d has no server", route.ID)
+			}
+			if len(route.Match) == 0 {
+				if hasPanelDefaultDNS {
+					return nil, nil, nil, errors.New("multiple matcherless panel DNS routes are ambiguous")
+				}
+				// A matcherless panel rule is the default resolver, not a
+				// skipFallback server with an empty domain matcher (which Xray
+				// never selects). Put it before local fallback resolvers.
+				dnsServers = append([]any{route.ActionValue}, dnsServers...)
+				hasPanelDefaultDNS = true
+				hasFallbackDNS = true
+				continue
 			}
 			dnsServers = append(dnsServers, map[string]any{
 				"address":      route.ActionValue,
@@ -489,6 +611,11 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 		}
 		rules = append(rules, rule)
 	}
+	if !hasFallbackDNS {
+		// Resolving through the VPS resolver keeps DNS egress in the VPS region
+		// instead of leaking the controller host's or client's resolver.
+		dnsServers = append([]any{"localhost"}, dnsServers...)
+	}
 	dns := map[string]any{
 		"servers":       dnsServers,
 		"queryStrategy": xrayDNSQueryStrategy(addressStrategy),
@@ -497,13 +624,13 @@ func xrayRoutes(routes []RouteSpec, blockPrivate bool, configuredDNS []string, a
 }
 
 func xrayDNSHijackRule() map[string]any {
-	// Match v2node's DNS interception contract. Client UDP/53 traffic is sent
+	// Match v2node's DNS interception contract. Client TCP/UDP 53 traffic is sent
 	// through Xray's built-in DNS outbound so the configured regional/routed
 	// resolvers are used instead of leaking the resolver selected by the client.
 	return map[string]any{
 		"type":        "field",
 		"inboundTag":  []string{InboundTag},
-		"network":     "udp",
+		"network":     "tcp,udp",
 		"port":        "53",
 		"outboundTag": DNSOutTag,
 	}

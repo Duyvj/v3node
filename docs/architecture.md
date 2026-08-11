@@ -29,7 +29,7 @@ the accounting collector, expose a generation boundary, and be covered by a
 measured loss/reconciliation test before release. This upstream limitation is
 tracked in [SagerNet/sing-box issue 4059](https://github.com/SagerNet/sing-box/issues/4059).
 
-The data-plane adapters are the project build of sing-box 1.13.12 and stock
+The data-plane adapters are the project build of sing-box 1.13.18 and stock
 Xray 26.3.27. Both remain separate binaries and processes, and only the adapter
 selected for the current node runs. This provides process-level fault
 isolation, independent upgrades, and clear license boundaries.

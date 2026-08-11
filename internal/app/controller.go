@@ -345,6 +345,9 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	if err := EnsureManagedCertificate(compiled.Node); err != nil {
 		return fmt.Errorf("prepare managed TLS certificate: %w", err)
 	}
+	for _, warning := range engine.SecurityWarnings(compiled.Node) {
+		c.logger.Printf("security warning: %s", warning)
+	}
 	rendered, err := renderer.Render(compiled.Node, compiled.Users, engine.Options{
 		LogLevel:        c.cfg.Runtime.LogLevel,
 		StatsListen:     c.cfg.Engine.StatsListen,

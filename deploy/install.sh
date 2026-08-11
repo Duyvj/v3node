@@ -11,12 +11,12 @@ readonly V3NODE_ARM64_ASSET=v3node-linux-arm64
 readonly V3NODE_AMD64_SHA256=UNPUBLISHED_REPLACE_WITH_64_HEX_SHA256
 readonly V3NODE_ARM64_SHA256=UNPUBLISHED_REPLACE_WITH_64_HEX_SHA256
 
-readonly SING_BOX_VERSION=1.13.12
-readonly SING_BOX_COMMIT=1086ab2563320e0da0c23b3a491d8dfa0939dff4
+readonly SING_BOX_VERSION=1.13.18
+readonly SING_BOX_COMMIT=45ca32dcb966f07f97fc888fe8586e359dbe8405
 readonly SING_BOX_BUILD_TAGS=with_quic,with_grpc,with_v2ray_api,with_clash_api,with_utls
 readonly SING_BOX_RELEASE_BASE=$V3NODE_RELEASE_BASE
-readonly SING_BOX_AMD64_ASSET=v3node-edge-1.13.12-p2-linux-amd64
-readonly SING_BOX_ARM64_ASSET=v3node-edge-1.13.12-p2-linux-arm64
+readonly SING_BOX_AMD64_ASSET=v3node-edge-1.13.18-p2-linux-amd64
+readonly SING_BOX_ARM64_ASSET=v3node-edge-1.13.18-p2-linux-arm64
 readonly SING_BOX_AMD64_SHA256=UNPUBLISHED_REPLACE_WITH_64_HEX_SHA256
 readonly SING_BOX_ARM64_SHA256=UNPUBLISHED_REPLACE_WITH_64_HEX_SHA256
 
@@ -86,7 +86,7 @@ Usage: install.sh [options]
   --v3node-file FILE        Use a local controller binary instead of the
                             versioned release asset.
   --v3node-sha256 SHA256    Required SHA256 for --v3node-file.
-  --sing-box-file FILE      Use a project-built sing-box 1.13.12-p2 binary.
+  --sing-box-file FILE      Use a project-built sing-box 1.13.18-p2 binary.
   --sing-box-sha256 SHA256  Required SHA256 for --sing-box-file.
   --xray-archive FILE       Use a local official Xray ZIP archive.
   --xray-sha256 SHA256      Required SHA256 for --xray-archive.

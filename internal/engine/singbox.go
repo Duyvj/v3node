@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/url"
@@ -51,6 +52,14 @@ func (SingBoxRenderer) Supports(node NodeSpec) error {
 	}
 	if node.Protocol == "anytls" && node.Transport != "" && node.Transport != "tcp" && node.Transport != "raw" {
 		return fmt.Errorf("stock sing-box AnyTLS does not support V2Ray transport %q", node.Transport)
+	}
+	if node.Protocol == "shadowsocks" {
+		if node.Transport != "" && node.Transport != "tcp" && node.Transport != "raw" {
+			return fmt.Errorf("sing-box Shadowsocks inbound does not support transport %q", node.Transport)
+		}
+		if node.TLS.Mode != "" && node.TLS.Mode != "none" {
+			return errors.New("sing-box Shadowsocks inbound does not support TLS/Reality; use the Xray backend for TCP transport security")
+		}
 	}
 	if (node.Transport == "tcp" || node.Transport == "raw" || node.Transport == "") && hasNonPlainTCPHeader(node.TransportSettings) {
 		return errors.New("sing-box cannot preserve the configured Xray TCP header; use the Xray backend")
@@ -142,6 +151,12 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 	default:
 		inbound["users"] = engineUsers
 	}
+	if node.Protocol == "vmess" || node.Protocol == "vless" || node.Protocol == "trojan" || node.Protocol == "shadowsocks" {
+		// sing-box stopped enabling inbound multiplex support by default in
+		// 1.7. Accept compatible client multiplexing without forcing clients to
+		// use it or requiring padded mux frames.
+		inbound["multiplex"] = map[string]any{"enabled": true}
+	}
 
 	if transport, err := singBoxTransport(node.Transport, node.TransportSettings); err != nil {
 		return Rendered{}, err
@@ -155,7 +170,7 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 	}
 	applySingBoxProtocolOptions(inbound, node)
 
-	routeRules, dnsRules, dnsServers, err := singBoxRoutes(node.Routes, opts.BlockPrivate)
+	routeRules, dnsRules, dnsServers, panelDefaultDNSTag, err := singBoxRoutes(node.Routes, opts.BlockPrivate)
 	if err != nil {
 		return Rendered{}, err
 	}
@@ -186,6 +201,9 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 			}
 			dnsServers = append(dnsServers, parsed)
 		}
+	}
+	if panelDefaultDNSTag != "" {
+		defaultDNSTag = panelDefaultDNSTag
 	}
 	needsBootstrap := false
 	for _, server := range dnsServers {
@@ -230,8 +248,9 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 			map[string]any{"type": "direct", "tag": DirectTag},
 		},
 		"route": map[string]any{
-			"rules": routeRules,
-			"final": DirectTag,
+			"rules":                   routeRules,
+			"final":                   DirectTag,
+			"default_domain_resolver": defaultDNSTag,
 		},
 		"experimental": experimental,
 	}
@@ -347,13 +366,43 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 	if err != nil {
 		return err
 	}
+	if value, exists := settings["acceptProxyProtocol"]; exists {
+		if _, ok := value.(bool); !ok {
+			return errors.New("transport acceptProxyProtocol must be boolean")
+		}
+	}
 	known := map[string]struct{}{"acceptProxyProtocol": {}}
 	switch kind {
 	case "", "tcp", "raw":
 		known["header"] = struct{}{}
+		if value, exists := settings["header"]; exists {
+			header, ok := value.(map[string]any)
+			if !ok {
+				return errors.New("TCP header must be an object")
+			}
+			if len(header) > 0 {
+				typeValue, exists := header["type"]
+				typeName, ok := typeValue.(string)
+				if !exists || !ok || (typeName != "" && typeName != "none") || len(header) != 1 {
+					return errors.New("TCP header settings require the Xray backend")
+				}
+			}
+		}
 	case "ws":
 		for _, key := range []string{"path", "headers", "maxEarlyData", "earlyDataHeaderName"} {
 			known[key] = struct{}{}
+		}
+		if err := validateTransportAlias(settings, []string{"path"}, "string", isStringSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"headers"}, "object", isMapSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"maxEarlyData"}, "non-negative integer", isNonNegativeIntegerSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"earlyDataHeaderName"}, "string", isStringSetting); err != nil {
+			return err
 		}
 		if pathValue, _ := settings["path"].(string); pathValue != "" {
 			if _, _, err := singBoxWebSocketPath(pathValue); err != nil {
@@ -368,6 +417,15 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 		} {
 			known[key] = struct{}{}
 		}
+		if err := validateTransportAlias(settings, []string{"serviceName", "service_name"}, "string", isStringSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"permit_without_stream", "permitWithoutStream"}, "boolean", isBoolSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"multiMode", "multi_mode"}, "boolean", isBoolSetting); err != nil {
+			return err
+		}
 		for _, key := range []string{"multiMode", "multi_mode"} {
 			if value, ok := settings[key].(bool); ok && value {
 				return errors.New("gRPC multiMode requires the Xray backend")
@@ -377,6 +435,9 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 			{"idle_timeout", "idleTimeout"},
 			{"health_check_timeout", "healthCheckTimeout"},
 		} {
+			if err := validateTransportAlias(settings, keys, "a duration string or integer seconds", isDurationSetting); err != nil {
+				return err
+			}
 			if _, _, err := singBoxDurationSetting(settings, keys); err != nil {
 				return err
 			}
@@ -385,18 +446,35 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 		for _, key := range []string{"host", "path", "headers", "header"} {
 			known[key] = struct{}{}
 		}
+		for _, key := range []string{"host", "path"} {
+			if err := validateTransportAlias(settings, []string{key}, "string", isStringSetting); err != nil {
+				return err
+			}
+		}
+		if err := validateTransportAlias(settings, []string{"headers", "header"}, "object", isMapSetting); err != nil {
+			return err
+		}
 		if pathValue, _ := settings["path"].(string); pathValue != "" {
 			parsed, err := url.Parse(pathValue)
 			if err != nil {
 				return fmt.Errorf("parse HTTPUpgrade path: %w", err)
 			}
-			if parsed.RawQuery != "" || parsed.Fragment != "" {
-				return errors.New("HTTPUpgrade path query/fragment requires the Xray backend")
+			if parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return errors.New("HTTPUpgrade path URL/query/fragment requires the Xray backend")
 			}
 		}
 	case "http":
 		for _, key := range []string{"path", "host", "headers"} {
 			known[key] = struct{}{}
+		}
+		if err := validateTransportAlias(settings, []string{"path"}, "string", isStringSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"host"}, "string or string list", isStringOrStringListSetting); err != nil {
+			return err
+		}
+		if err := validateTransportAlias(settings, []string{"headers"}, "object", isMapSetting); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("sing-box does not support transport %q", kind)
@@ -407,6 +485,73 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 		}
 	}
 	return nil
+}
+
+func validateTransportAlias(settings map[string]any, keys []string, expected string, valid func(any) bool) error {
+	found := ""
+	for _, key := range keys {
+		value, exists := settings[key]
+		if !exists {
+			continue
+		}
+		if found != "" {
+			return fmt.Errorf("transport settings contain conflicting aliases %q and %q", found, key)
+		}
+		found = key
+		if !valid(value) {
+			return fmt.Errorf("transport setting %q must be %s", key, expected)
+		}
+	}
+	return nil
+}
+
+func isStringSetting(value any) bool {
+	_, ok := value.(string)
+	return ok
+}
+
+func isBoolSetting(value any) bool {
+	_, ok := value.(bool)
+	return ok
+}
+
+func isMapSetting(value any) bool {
+	_, ok := value.(map[string]any)
+	return ok
+}
+
+func isNonNegativeIntegerSetting(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	parsed, err := number.Int64()
+	return err == nil && parsed >= 0 && parsed <= int64(^uint32(0)>>1)
+}
+
+func isDurationSetting(value any) bool {
+	switch value.(type) {
+	case string, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+
+func isStringOrStringListSetting(value any) bool {
+	if _, ok := value.(string); ok {
+		return true
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range values {
+		if _, ok := item.(string); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func webSocketEarlyData(pathValue string) int64 {
@@ -508,6 +653,16 @@ func decodeSettings(raw json.RawMessage) (map[string]any, error) {
 	var settings map[string]any
 	if err := decoder.Decode(&settings); err != nil {
 		return nil, fmt.Errorf("decode transport settings: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("transport settings contain multiple JSON values")
+		}
+		return nil, fmt.Errorf("decode trailing transport settings: %w", err)
+	}
+	if settings == nil {
+		return map[string]any{}, nil
 	}
 	return settings, nil
 }
@@ -626,6 +781,7 @@ func singBoxTLS(spec TLSSpec) (map[string]any, error) {
 	}
 	switch spec.Mode {
 	case "tls":
+		tls["min_version"] = "1.2"
 		tls["certificate_path"] = spec.CertificateFile
 		tls["key_path"] = spec.KeyFile
 	case "reality":
@@ -635,8 +791,9 @@ func singBoxTLS(spec TLSSpec) (map[string]any, error) {
 				"server":      spec.DestinationHost,
 				"server_port": spec.DestinationPort,
 			},
-			"private_key": spec.PrivateKey,
-			"short_id":    spec.ShortIDs,
+			"private_key":         spec.PrivateKey,
+			"short_id":            spec.ShortIDs,
+			"max_time_difference": realityMaxTimeDifference(spec).String(),
 		}
 	default:
 		return nil, fmt.Errorf("unsupported TLS mode %q", spec.Mode)
@@ -738,19 +895,20 @@ func singBoxEncryptedDNSServer(value, tag, scheme string, defaultPort int, defau
 	return result, nil
 }
 
-func singBoxRoutes(routes []RouteSpec, blockPrivate bool) ([]map[string]any, []map[string]any, []map[string]any, error) {
-	// Keep the original v2node DNS contract: UDP queries sent by clients to an
+func singBoxRoutes(routes []RouteSpec, blockPrivate bool) ([]map[string]any, []map[string]any, []map[string]any, string, error) {
+	// Keep the original v2node DNS contract: DNS queries sent by clients to an
 	// arbitrary resolver on port 53 are answered by the engine's configured DNS
 	// stack. This avoids resolver/location leaks without opening a second local
 	// listener or keeping another process resident.
 	rules := make([]map[string]any, 0, len(routes)+3)
 	rules = append(rules, map[string]any{
-		"network": "udp",
+		"network": []string{"tcp", "udp"},
 		"port":    []int{53},
 		"action":  "hijack-dns",
 	})
 	dnsRules := make([]map[string]any, 0)
 	dnsServers := make([]map[string]any, 0)
+	defaultDNSTag := ""
 	if blockPrivate {
 		rules = append(rules, map[string]any{"ip_is_private": true, "action": "reject", "method": "drop"})
 		// Explicitly protect cloud metadata even if an engine changes its
@@ -762,19 +920,19 @@ func singBoxRoutes(routes []RouteSpec, blockPrivate bool) ([]map[string]any, []m
 		switch route.Action {
 		case "block":
 			if requiresXrayGeodata([]RouteSpec{route}) {
-				return nil, nil, nil, fmt.Errorf("route %d uses Xray GeoIP/GeoSite asset syntax; use the Xray backend", route.ID)
+				return nil, nil, nil, "", fmt.Errorf("route %d uses Xray GeoIP/GeoSite asset syntax; use the Xray backend", route.ID)
 			}
 			rule := map[string]any{"action": "reject", "method": "drop"}
 			applyDomains(rule, route.Match)
 			if !hasMatcher(rule) {
-				return nil, nil, nil, fmt.Errorf("route %d has no supported domain matcher", route.ID)
+				return nil, nil, nil, "", fmt.Errorf("route %d has no supported domain matcher", route.ID)
 			}
 			rules = append(rules, rule)
 		case "block_ip":
 			for _, cidr := range route.Match {
 				if net.ParseIP(cidr) == nil {
 					if _, _, err := net.ParseCIDR(cidr); err != nil {
-						return nil, nil, nil, fmt.Errorf("route %d has invalid IP/CIDR %q", route.ID, cidr)
+						return nil, nil, nil, "", fmt.Errorf("route %d has invalid IP/CIDR %q", route.ID, cidr)
 					}
 				}
 			}
@@ -782,7 +940,7 @@ func singBoxRoutes(routes []RouteSpec, blockPrivate bool) ([]map[string]any, []m
 		case "block_port":
 			rule, err := portRule(route.Match)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("route %d: %w", route.ID, err)
+				return nil, nil, nil, "", fmt.Errorf("route %d: %w", route.ID, err)
 			}
 			rule["action"] = "reject"
 			rule["method"] = "drop"
@@ -791,27 +949,33 @@ func singBoxRoutes(routes []RouteSpec, blockPrivate bool) ([]map[string]any, []m
 			rules = append(rules, map[string]any{"protocol": route.Match, "action": "reject", "method": "drop"})
 		case "dns":
 			if requiresXrayGeodata([]RouteSpec{route}) {
-				return nil, nil, nil, fmt.Errorf("route %d uses Xray GeoIP/GeoSite asset syntax; use the Xray backend", route.ID)
+				return nil, nil, nil, "", fmt.Errorf("route %d uses Xray GeoIP/GeoSite asset syntax; use the Xray backend", route.ID)
 			}
 			server, err := singBoxDNSServer(route.ActionValue, fmt.Sprintf("panel-dns-%d", dnsIndex))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("route %d: %w", route.ID, err)
+				return nil, nil, nil, "", fmt.Errorf("route %d: %w", route.ID, err)
 			}
 			dnsIndex++
 			dnsServers = append(dnsServers, server)
 			rule := map[string]any{"action": "route", "server": server["tag"]}
 			applyDomains(rule, route.Match)
 			if !hasMatcher(rule) && len(route.Match) > 0 {
-				return nil, nil, nil, fmt.Errorf("route %d has no supported DNS matcher", route.ID)
+				return nil, nil, nil, "", fmt.Errorf("route %d has no supported DNS matcher", route.ID)
+			}
+			if len(route.Match) == 0 {
+				if defaultDNSTag != "" {
+					return nil, nil, nil, "", errors.New("multiple matcherless panel DNS routes are ambiguous")
+				}
+				defaultDNSTag = server["tag"].(string)
 			}
 			dnsRules = append(dnsRules, rule)
 		case "route", "route_ip", "default_out":
-			return nil, nil, nil, fmt.Errorf("route %d requests a custom outbound; arbitrary panel outbounds are disabled in the independent engine", route.ID)
+			return nil, nil, nil, "", fmt.Errorf("route %d requests a custom outbound; arbitrary panel outbounds are disabled in the independent engine", route.ID)
 		default:
-			return nil, nil, nil, fmt.Errorf("route %d has unsupported action %q", route.ID, route.Action)
+			return nil, nil, nil, "", fmt.Errorf("route %d has unsupported action %q", route.ID, route.Action)
 		}
 	}
-	return rules, dnsRules, dnsServers, nil
+	return rules, dnsRules, dnsServers, defaultDNSTag, nil
 }
 
 func applyDomains(rule map[string]any, values []string) {

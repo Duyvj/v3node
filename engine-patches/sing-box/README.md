@@ -1,10 +1,10 @@
 # v3node edge engine
 
 The controller uses sing-box as a separate data-plane process. Official
-v1.13.12 binaries omit the V2Ray statistics API, so v3node publishes a
+v1.13.18 binaries omit the V2Ray statistics API, so v3node publishes a
 separate GPLv3 engine build with:
 
-- upstream commit `1086ab2563320e0da0c23b3a491d8dfa0939dff4`;
+- upstream commit `45ca32dcb966f07f97fc888fe8586e359dbe8405`;
 - the documented `with_v2ray_api`, QUIC, gRPC, Clash API and uTLS/Reality tags;
 - one observable patch exposing the already authenticated user name in the
   loopback Clash `/connections` response;

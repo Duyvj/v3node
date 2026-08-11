@@ -236,6 +236,13 @@ func compileTLS(node model.NodeConfig, nodeID int64, stateDir string) (engine.TL
 		return result, nil
 	case model.SecurityReality:
 		result.Mode = "reality"
+		// The original singular panel field cannot distinguish an omitted
+		// short_id from the intentionally empty value accepted by REALITY.
+		// Preserve that legacy mode and surface it as an operational warning;
+		// newer panels can send an explicit non-empty short_ids list.
+		if len(result.ShortIDs) == 0 {
+			result.ShortIDs = []string{""}
+		}
 		if result.Xver > 2 {
 			return engine.TLSSpec{}, errors.New("Reality xver must be 0, 1, or 2")
 		}
@@ -264,12 +271,32 @@ func parseRealityDestination(destination, fallbackPort string) (string, uint16, 
 	if destination == "" {
 		return "", 0, errors.New("Reality destination is empty")
 	}
+	if strings.ContainsAny(destination, "\x00\r\n\t /\\?#@") {
+		return "", 0, errors.New("Reality destination must be a plain host or host:port")
+	}
 	if host, portText, err := net.SplitHostPort(destination); err == nil {
+		if host == "" {
+			return "", 0, errors.New("Reality destination host is empty")
+		}
 		port, err := strconv.Atoi(portText)
 		if err != nil || port < 1 || port > 65535 {
 			return "", 0, errors.New("Reality destination has an invalid port")
 		}
 		return host, uint16(port), nil
+	}
+	if strings.HasPrefix(destination, "[") || strings.HasSuffix(destination, "]") {
+		if !strings.HasPrefix(destination, "[") || !strings.HasSuffix(destination, "]") {
+			return "", 0, errors.New("Reality destination has invalid IPv6 brackets")
+		}
+		host := strings.TrimSuffix(strings.TrimPrefix(destination, "["), "]")
+		if ip := net.ParseIP(host); ip == nil || ip.To4() != nil {
+			return "", 0, errors.New("Reality destination has invalid bracketed IPv6")
+		}
+		destination = host
+	} else if strings.Contains(destination, ":") {
+		if ip := net.ParseIP(destination); ip == nil || ip.To4() != nil {
+			return "", 0, errors.New("Reality destination has an invalid host:port or IPv6 value")
+		}
 	}
 	port := 443
 	if fallbackPort != "" {
@@ -279,7 +306,7 @@ func parseRealityDestination(destination, fallbackPort string) (string, uint16, 
 		}
 		port = parsed
 	}
-	return strings.Trim(destination, "[]"), uint16(port), nil
+	return destination, uint16(port), nil
 }
 
 func parsePanelBool(value string) bool {

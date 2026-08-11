@@ -10,6 +10,11 @@ import (
 	"github.com/Duyvj/v3node/internal/model"
 )
 
+const (
+	testRealityPrivateKey = "YH_3NR-KMAo_6CQQrwq7YkL_IWBiAlX3MTEaJpDEFTU"
+	testMLDSA65Seed       = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
 func TestCompileState(t *testing.T) {
 	node := model.NodeConfig{
 		Protocol:        model.ProtocolVLESS,
@@ -21,7 +26,7 @@ func TestCompileState(t *testing.T) {
 		TLSSettings: model.TLSSettings{
 			ServerName: "www.example.com",
 			Dest:       "www.example.com:443",
-			PrivateKey: "private-key",
+			PrivateKey: testRealityPrivateKey,
 			ShortID:    "12345678",
 		},
 		BaseConfig: &model.BaseConfig{PullInterval: 60, PushInterval: 45, NodeReportMinTraffic: 1},
@@ -46,9 +51,9 @@ func TestCompileRealityFallsBackToServerName(t *testing.T) {
 		TLSSettings: model.TLSSettings{
 			ServerName:  "www.example.com",
 			ServerPort:  "8443",
-			PrivateKey:  "private-key",
+			PrivateKey:  testRealityPrivateKey,
 			ShortID:     "12345678",
-			MLDSA65Seed: "seed",
+			MLDSA65Seed: testMLDSA65Seed,
 			Xver:        2,
 		},
 	}
@@ -56,7 +61,7 @@ func TestCompileRealityFallsBackToServerName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compiled.Node.TLS.DestinationHost != "www.example.com" || compiled.Node.TLS.DestinationPort != 8443 || compiled.Node.TLS.Xver != 2 || compiled.Node.TLS.MLDSA65Seed != "seed" {
+	if compiled.Node.TLS.DestinationHost != "www.example.com" || compiled.Node.TLS.DestinationPort != 8443 || compiled.Node.TLS.Xver != 2 || compiled.Node.TLS.MLDSA65Seed != testMLDSA65Seed {
 		t.Fatalf("unexpected Reality settings: %#v", compiled.Node.TLS)
 	}
 }
@@ -69,7 +74,7 @@ func TestCompileRealityFallsBackToPluralServerNames(t *testing.T) {
 		TLS:        model.SecurityReality,
 		TLSSettings: model.TLSSettings{
 			ServerNames: []string{"edge.example", "fallback.example"},
-			PrivateKey:  "private-key",
+			PrivateKey:  testRealityPrivateKey,
 			ShortIDs:    []string{"12345678"},
 		},
 	}
@@ -79,6 +84,56 @@ func TestCompileRealityFallsBackToPluralServerNames(t *testing.T) {
 	}
 	if compiled.Node.TLS.ServerName != "edge.example" || compiled.Node.TLS.DestinationHost != "edge.example" || compiled.Node.TLS.DestinationPort != 443 {
 		t.Fatalf("unexpected Reality plural-name fallback: %#v", compiled.Node.TLS)
+	}
+}
+
+func TestCompileRealityPreservesLegacyEmptyShortID(t *testing.T) {
+	node := model.NodeConfig{
+		Protocol:   model.ProtocolVLESS,
+		ServerPort: 443,
+		Network:    "tcp",
+		TLS:        model.SecurityReality,
+		TLSSettings: model.TLSSettings{
+			ServerName: "edge.example",
+			PrivateKey: testRealityPrivateKey,
+		},
+	}
+	compiled, err := CompileState(node, []model.User{{ID: 1, UUID: "48e90e76-2a72-46be-ac91-45d96486977a"}}, config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.Node.TLS.ShortIDs) != 1 || compiled.Node.TLS.ShortIDs[0] != "" {
+		t.Fatalf("legacy empty Reality short ID was not preserved: %#v", compiled.Node.TLS.ShortIDs)
+	}
+}
+
+func TestParseRealityDestinationRejectsAmbiguousValues(t *testing.T) {
+	valid := []struct {
+		value        string
+		fallbackPort string
+		host         string
+		port         uint16
+	}{
+		{value: "example.com:8443", host: "example.com", port: 8443},
+		{value: "example.com", fallbackPort: "9443", host: "example.com", port: 9443},
+		{value: "[2001:db8::1]:8443", host: "2001:db8::1", port: 8443},
+		{value: "2001:db8::1", host: "2001:db8::1", port: 443},
+		{value: "[2001:db8::1]", fallbackPort: "9443", host: "2001:db8::1", port: 9443},
+	}
+	for _, test := range valid {
+		host, port, err := parseRealityDestination(test.value, test.fallbackPort)
+		if err != nil || host != test.host || port != test.port {
+			t.Errorf("parseRealityDestination(%q, %q) = %q, %d, %v", test.value, test.fallbackPort, host, port, err)
+		}
+	}
+
+	for _, value := range []string{
+		"https://example.com", "example.com:not-a-port", "example.com:0", ":443",
+		"[broken", "example.com/path", "example.com:443:bad", "example.com\n:443",
+	} {
+		if _, _, err := parseRealityDestination(value, ""); err == nil {
+			t.Errorf("accepted invalid Reality destination %q", value)
+		}
 	}
 }
 

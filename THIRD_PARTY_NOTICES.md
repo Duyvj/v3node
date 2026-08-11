@@ -101,10 +101,10 @@ release source/SBOM phải giữ nguyên tệp đó khi vendor source.
 ## sing-box engine tùy biến
 
 - Upstream: <https://github.com/SagerNet/sing-box>
-- Phiên bản: 1.13.12
-- Commit chính xác: `1086ab2563320e0da0c23b3a491d8dfa0939dff4`
+- Phiên bản: 1.13.18
+- Commit chính xác: `45ca32dcb966f07f97fc888fe8586e359dbe8405`
 - Source input SHA-256:
-  `8b0d61adec28a16dbc3fc346bb82ab36fd64b879c9531be5e82c6b2af7582649`
+  `62693e51bbc42d937af923f888b8a9c197127e3ca25f3a6e01f863963b43f450`
 - Thay đổi dự án:
   [`0001-expose-authenticated-user.patch`](engine-patches/sing-box/0001-expose-authenticated-user.patch)
   và

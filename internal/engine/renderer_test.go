@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+const (
+	testRealityPrivateKey  = "YH_3NR-KMAo_6CQQrwq7YkL_IWBiAlX3MTEaJpDEFTU"
+	testMLDSA65Seed        = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	testVLESSEncryptionKey = "0B7MUsfiVdKqBK20cdhgsBnJyaz-XXrR3qal7rSVHFM"
+)
+
 func baseNode() NodeSpec {
 	return NodeSpec{
 		Protocol:  "vless",
@@ -18,7 +24,7 @@ func baseNode() NodeSpec {
 			ServerName:      "www.example.com",
 			DestinationHost: "www.example.com",
 			DestinationPort: 443,
-			PrivateKey:      "private-key",
+			PrivateKey:      testRealityPrivateKey,
 			ShortIDs:        []string{"01234567"},
 		},
 	}
@@ -63,7 +69,7 @@ func TestSelect(t *testing.T) {
 		t.Fatalf("VLESS encryption renderer=%v err=%v", renderer, err)
 	}
 	node = baseNode()
-	node.TLS.MLDSA65Seed = "seed"
+	node.TLS.MLDSA65Seed = testMLDSA65Seed
 	renderer, err = Select("auto", node)
 	if err != nil || renderer.Name() != "xray" {
 		t.Fatalf("Reality ML-DSA renderer=%v err=%v", renderer, err)
@@ -195,6 +201,72 @@ func TestValidateSpecRejectsMatcherlessBlockingRules(t *testing.T) {
 	}
 }
 
+func TestValidateSpecRejectsMalformedRealitySecurity(t *testing.T) {
+	user := []UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}
+	tests := []struct {
+		name   string
+		mutate func(*NodeSpec)
+	}{
+		{name: "private key", mutate: func(node *NodeSpec) { node.TLS.PrivateKey = "not-a-key" }},
+		{name: "missing server names", mutate: func(node *NodeSpec) { node.TLS.ServerName = ""; node.TLS.ServerNames = nil }},
+		{name: "wildcard server name", mutate: func(node *NodeSpec) { node.TLS.ServerName = "*.example.com"; node.TLS.ServerNames = nil }},
+		{name: "duplicate server names", mutate: func(node *NodeSpec) { node.TLS.ServerNames = []string{"edge.example", "EDGE.EXAMPLE"} }},
+		{name: "risky Apple target", mutate: func(node *NodeSpec) { node.TLS.DestinationHost = "www.icloud.com" }},
+		{name: "odd short ID", mutate: func(node *NodeSpec) { node.TLS.ShortIDs = []string{"abc"} }},
+		{name: "long short ID", mutate: func(node *NodeSpec) { node.TLS.ShortIDs = []string{"001122334455667788"} }},
+		{name: "non-hex short ID", mutate: func(node *NodeSpec) { node.TLS.ShortIDs = []string{"not-hex!"} }},
+		{name: "duplicate padded short ID", mutate: func(node *NodeSpec) { node.TLS.ShortIDs = []string{"aa", "aa00"} }},
+		{name: "destination URL", mutate: func(node *NodeSpec) { node.TLS.DestinationHost = "https://example.com" }},
+		{name: "listener loop", mutate: func(node *NodeSpec) { node.Listen = "127.0.0.1"; node.TLS.DestinationHost = "127.0.0.1" }},
+		{name: "invalid ML-DSA seed", mutate: func(node *NodeSpec) { node.TLS.MLDSA65Seed = "bad-seed" }},
+		{name: "reused ML-DSA seed", mutate: func(node *NodeSpec) { node.TLS.MLDSA65Seed = node.TLS.PrivateKey }},
+		{name: "invalid xver", mutate: func(node *NodeSpec) { node.TLS.Xver = 3 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			node := baseNode()
+			test.mutate(&node)
+			if err := ValidateSpec(node, user); err == nil {
+				t.Fatal("invalid REALITY configuration was accepted")
+			}
+		})
+	}
+
+	node := baseNode()
+	node.TLS.ServerName = ""
+	node.TLS.ServerNames = []string{""}
+	if err := ValidateSpec(node, user); err != nil {
+		t.Fatalf("explicit no-SNI REALITY mode was rejected: %v", err)
+	}
+}
+
+func TestSecurityWarningsExposeOperationalAntiGFWRisks(t *testing.T) {
+	node := baseNode()
+	node.Port = 8443
+	node.TLS.ShortIDs = []string{""}
+	warnings := strings.Join(SecurityWarnings(node), "\n")
+	if !strings.Contains(warnings, "non-443") || !strings.Contains(warnings, "empty short ID") {
+		t.Fatalf("missing REALITY security warnings: %q", warnings)
+	}
+
+	node = NodeSpec{Protocol: "trojan", Port: 443, Transport: "tcp", TLS: TLSSpec{Mode: "none"}}
+	if warnings := strings.Join(SecurityWarnings(node), "\n"); !strings.Contains(warnings, "no TLS/REALITY") {
+		t.Fatalf("missing plaintext listener warning: %q", warnings)
+	}
+
+	node = NodeSpec{
+		Protocol:          "shadowsocks",
+		Port:              443,
+		Transport:         "tcp",
+		TransportSettings: json.RawMessage(`{"acceptProxyProtocol":true}`),
+		TLS:               TLSSpec{Mode: "tls"},
+	}
+	warnings = strings.Join(SecurityWarnings(node), "\n")
+	if !strings.Contains(warnings, "inbound PROXY protocol") || !strings.Contains(warnings, "Shadowsocks UDP") {
+		t.Fatalf("missing PROXY/UDP security warnings: %q", warnings)
+	}
+}
+
 func TestXrayRealityRejectsUnsupportedTransport(t *testing.T) {
 	for _, transport := range []string{"ws", "websocket", "httpupgrade"} {
 		node := baseNode()
@@ -226,12 +298,69 @@ func TestSingBoxNativeProtocolsRejectUnsupportedTransportCombinations(t *testing
 	}
 }
 
+func TestSingBoxShadowsocksRejectsUnsupportedTLSAndTransport(t *testing.T) {
+	node := NodeSpec{Protocol: "shadowsocks", Port: 8388, Transport: "tcp", Cipher: "aes-128-gcm", TLS: TLSSpec{Mode: "tls", CertificateFile: "/test/cert.pem", KeyFile: "/test/key.pem"}}
+	renderer, err := Select("auto", node)
+	if err != nil || renderer.Name() != "xray" {
+		t.Fatalf("Shadowsocks TLS renderer=%v err=%v", renderer, err)
+	}
+	if _, err := Select("sing-box", node); err == nil {
+		t.Fatal("sing-box accepted Shadowsocks TLS")
+	}
+	node.TLS = TLSSpec{Mode: "none"}
+	node.Transport = "ws"
+	if _, err := Select("auto", node); err == nil {
+		t.Fatal("a backend accepted Shadowsocks WebSocket")
+	}
+}
+
+func TestSingBoxTransportSettingsRejectWrongTypesAndAliasConflicts(t *testing.T) {
+	tests := []struct {
+		transport string
+		settings  string
+	}{
+		{transport: "tcp", settings: `{"header":"none"}`},
+		{transport: "ws", settings: `{"path":123}`},
+		{transport: "ws", settings: `{"headers":[]}`},
+		{transport: "grpc", settings: `{"serviceName":"one","service_name":"two"}`},
+		{transport: "grpc", settings: `{"serviceName":1}`},
+		{transport: "grpc", settings: `{"permitWithoutStream":"yes"}`},
+		{transport: "httpupgrade", settings: `{"headers":"bad"}`},
+		{transport: "http", settings: `{"host":["ok",1]}`},
+		{transport: "ws", settings: `{"acceptProxyProtocol":"true"}`},
+	}
+	for _, test := range tests {
+		node := NodeSpec{Protocol: "vless", Port: 443, Transport: test.transport, TransportSettings: json.RawMessage(test.settings), TLS: TLSSpec{Mode: "none"}}
+		if _, err := Select("sing-box", node); err == nil {
+			t.Fatalf("accepted %s settings %s", test.transport, test.settings)
+		}
+	}
+}
+
+func TestSingBoxCertificateTLSHasModernMinimumAndRealityReplayWindow(t *testing.T) {
+	tlsConfig, err := singBoxTLS(TLSSpec{Mode: "tls", CertificateFile: "/test/cert.pem", KeyFile: "/test/key.pem"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tlsConfig["min_version"] != "1.2" {
+		t.Fatalf("TLS minimum = %#v", tlsConfig["min_version"])
+	}
+	realityConfig, err := singBoxTLS(baseNode().TLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reality := realityConfig["reality"].(map[string]any)
+	if reality["max_time_difference"] != "5m0s" {
+		t.Fatalf("REALITY replay window = %#v", reality["max_time_difference"])
+	}
+}
+
 func TestSingBoxRenderReality(t *testing.T) {
 	got, err := (SingBoxRenderer{}).Render(baseNode(), []UserSpec{{ID: 42, Credential: "9f248408-79be-4f4d-927c-51cba1418b4f"}}, baseOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid(got.Config) || !strings.Contains(string(got.Config), `"uid-42"`) || strings.Contains(string(got.Config), `"uuid":"uid-42"`) {
+	if !json.Valid(got.Config) || !strings.Contains(string(got.Config), `"uid-42"`) || strings.Contains(string(got.Config), `"uuid":"uid-42"`) || !strings.Contains(string(got.Config), `"multiplex":{"enabled":true}`) {
 		t.Fatalf("unexpected config: %s", got.Config)
 	}
 	if got.Users["uid-42"] != 42 {
@@ -320,6 +449,7 @@ func TestSingBoxResolvesBeforeProtectedIPRules(t *testing.T) {
 func TestXrayRenderXHTTP(t *testing.T) {
 	node := baseNode()
 	node.Transport = "xhttp"
+	node.Flow = ""
 	node.TransportSettings = json.RawMessage(`{"path":"/edge"}`)
 	got, err := (XrayRenderer{}).Render(node, []UserSpec{{ID: 7, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}, baseOptions())
 	if err != nil {
@@ -370,6 +500,24 @@ func TestXrayStreamKeepsTransportSecurityWithEmptySettings(t *testing.T) {
 				t.Fatalf("acceptProxyProtocol = %t, want %t", got, test.wantProxy)
 			}
 		})
+	}
+}
+
+func TestXrayDisablesImplicitForwardedForTrust(t *testing.T) {
+	node := NodeSpec{Protocol: "vless", Port: 443, Transport: "ws", TLS: TLSSpec{Mode: "none"}}
+	stream, err := xrayStream(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockopt := stream["sockopt"].(map[string]any)
+	headers, ok := sockopt["trustedXForwardedFor"].([]string)
+	if !ok || len(headers) != 1 || headers[0] != xrayDisabledForwardedForHeader {
+		t.Fatalf("implicit XFF trust was not disabled: %#v", stream)
+	}
+
+	node.TrustedXForwardedFor = []string{"192.0.2.0/24"}
+	if _, err := Select("xray", node); err == nil {
+		t.Fatal("pinned Xray accepted unsupported CIDR trusted XFF")
 	}
 }
 
@@ -436,6 +584,7 @@ func TestXrayFreedomExplicitlyAllowsPrivateDestinationsWhenConfigured(t *testing
 func TestXrayRenderUsesConfiguredRegionalDNS(t *testing.T) {
 	node := baseNode()
 	node.Transport = "xhttp"
+	node.Flow = ""
 	opts := baseOptions()
 	opts.DNSServers = []string{"https://dns.example/dns-query"}
 	opts.AddressStrategy = "ipv6_only"
@@ -460,14 +609,81 @@ func TestXrayRenderUsesConfiguredRegionalDNS(t *testing.T) {
 func TestXrayRenderBuildsVLESSEncryptionContract(t *testing.T) {
 	node := baseNode()
 	node.Encryption = "mlkem768x25519plus"
-	node.EncryptionSettings = json.RawMessage(`{"mode":"native","ticket":"ticket","server_padding":"100-111-1111.75-0-111.50-0-3333","private_key":"private"}`)
+	node.EncryptionSettings = json.RawMessage(`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.75-0-111.50-0-3333","private_key":"` + testVLESSEncryptionKey + `"}`)
 	got, err := (XrayRenderer{}).Render(node, []UserSpec{{ID: 7, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}, baseOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(got.Config)
-	if !strings.Contains(text, `"decryption":"mlkem768x25519plus.native.ticket.100-111-1111.75-0-111.50-0-3333.private"`) || strings.Contains(text, `"encryptionSettings"`) {
+	if !strings.Contains(text, `"decryption":"mlkem768x25519plus.native.600s.100-111-1111.75-0-111.50-0-3333.`+testVLESSEncryptionKey+`"`) || strings.Contains(text, `"encryptionSettings"`) {
 		t.Fatalf("unexpected VLESS encryption config: %s", text)
+	}
+}
+
+func TestXrayVLESSEncryptionRejectsMalformedComponents(t *testing.T) {
+	tests := []string{
+		`{"mode":"bad","ticket":"600s","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"3601s","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"500-100s","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600s","server_padding":"100-111-1111.75-0-111","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600s","server_padding":"99-111-1111","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600s","server_padding":"100-100-50","private_key":"` + testVLESSEncryptionKey + `"}`,
+		`{"mode":"native","ticket":"600s","private_key":"bad"}`,
+		`{"mode":"native","ticket":"600s","private_key":"` + testVLESSEncryptionKey + `","unknown":true}`,
+	}
+	for _, settings := range tests {
+		node := NodeSpec{Protocol: "vless", Encryption: "mlkem768x25519plus", EncryptionSettings: json.RawMessage(settings)}
+		if _, err := xrayVLESSDecryption(node); err == nil {
+			t.Fatalf("accepted malformed VLESS encryption settings %s", settings)
+		}
+	}
+
+	node := NodeSpec{Protocol: "vless", Encryption: "mlkem768x25519plus", EncryptionSettings: json.RawMessage(`{"mode":"random","ticket":"0s","private_key":"` + testVLESSEncryptionKey + `"}`)}
+	if _, err := xrayVLESSDecryption(node); err != nil {
+		t.Fatalf("valid stateless VLESS encryption was rejected: %v", err)
+	}
+}
+
+func TestXrayMatcherlessPanelDNSBecomesFallbackResolver(t *testing.T) {
+	_, dns, _, err := xrayRoutes([]RouteSpec{{ID: 7, Action: "dns", ActionValue: "https://dns.example/dns-query"}}, false, nil, "prefer_ipv4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := dns["servers"].([]any)
+	if len(servers) != 1 || servers[0] != "https://dns.example/dns-query" {
+		t.Fatalf("matcherless panel DNS is not the default resolver: %#v", servers)
+	}
+	if _, _, _, err := xrayRoutes([]RouteSpec{
+		{ID: 7, Action: "dns", ActionValue: "1.1.1.1"},
+		{ID: 8, Action: "dns", ActionValue: "8.8.8.8"},
+	}, false, nil, "prefer_ipv4"); err == nil {
+		t.Fatal("multiple matcherless DNS routes were accepted")
+	}
+}
+
+func TestValidateSpecChecksProtocolEncryptionOptions(t *testing.T) {
+	users := []UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}}
+	node := NodeSpec{
+		Protocol: "shadowsocks", Port: 8388, Transport: "tcp", Cipher: "2022-blake3-aes-128-gcm",
+		ServerKey: "AAAAAAAAAAAAAAAAAAAAAA==", TLS: TLSSpec{Mode: "none"},
+	}
+	if err := ValidateSpec(node, users); err != nil {
+		t.Fatalf("valid Shadowsocks 2022 server key was rejected: %v", err)
+	}
+	node.ServerKey = "short"
+	if err := ValidateSpec(node, users); err == nil {
+		t.Fatal("invalid Shadowsocks 2022 server key was accepted")
+	}
+
+	node = NodeSpec{Protocol: "hysteria2", Port: 443, Transport: "tcp", Obfs: "salamander", TLS: TLSSpec{Mode: "tls", CertificateFile: "/test/cert.pem", KeyFile: "/test/key.pem"}}
+	if err := ValidateSpec(node, users); err == nil {
+		t.Fatal("Hysteria2 salamander without a password was accepted")
+	}
+
+	node = NodeSpec{Protocol: "vless", Port: 443, Transport: "ws", Flow: "xtls-rprx-vision", TLS: TLSSpec{Mode: "tls", CertificateFile: "/test/cert.pem", KeyFile: "/test/key.pem"}}
+	if err := ValidateSpec(node, users); err == nil {
+		t.Fatal("Vision over WebSocket without VLESS Encryption was accepted")
 	}
 }
 
@@ -580,12 +796,18 @@ func TestSingBoxKeepsRouteSpecificDNSOutOfDefaultSelection(t *testing.T) {
 			Final   string           `json:"final"`
 			Servers []map[string]any `json:"servers"`
 		} `json:"dns"`
+		Route struct {
+			DefaultDomainResolver string `json:"default_domain_resolver"`
+		} `json:"route"`
 	}
 	if err := json.Unmarshal(got.Config, &document); err != nil {
 		t.Fatal(err)
 	}
 	if document.DNS.Final != "system-dns" {
 		t.Fatalf("route-specific resolver became default: %#v", document.DNS)
+	}
+	if document.Route.DefaultDomainResolver != "system-dns" {
+		t.Fatalf("route-specific resolver became the outbound domain resolver: %#v", document.Route)
 	}
 	foundSystem := false
 	for _, server := range document.DNS.Servers {
@@ -608,5 +830,20 @@ func TestSingBoxKeepsRouteSpecificDNSOutOfDefaultSelection(t *testing.T) {
 	}
 	if document.DNS.Final != "regional-0" {
 		t.Fatalf("configured regional resolver is not default: %#v", document.DNS)
+	}
+	if document.Route.DefaultDomainResolver != "regional-0" {
+		t.Fatalf("configured regional resolver is not used for outbound domains: %#v", document.Route)
+	}
+
+	node.Routes = []RouteSpec{{ID: 10, Action: "dns", ActionValue: "1.1.1.1"}}
+	got, err = (SingBoxRenderer{}).Render(node, []UserSpec{{ID: 42, Credential: "9f248408-79be-4f4d-927c-51cba1418b4f"}}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(got.Config, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Route.DefaultDomainResolver != "panel-dns-0" {
+		t.Fatalf("matcherless panel DNS is not used for outbound domains: %#v", document.Route)
 	}
 }

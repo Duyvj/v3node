@@ -14,19 +14,19 @@ explicitly:
 
 ```bash
 sha256sum ./v3node-linux-amd64
-sha256sum ./v3node-edge-1.13.12-p2-linux-amd64
+sha256sum ./v3node-edge-1.13.18-p2-linux-amd64
 sha256sum ./Xray-linux-64.zip
 sudo ./deploy/install.sh \
   --v3node-file ./v3node-linux-amd64 \
   --v3node-sha256 '<64-character digest>' \
-  --sing-box-file ./v3node-edge-1.13.12-p2-linux-amd64 \
+  --sing-box-file ./v3node-edge-1.13.18-p2-linux-amd64 \
   --sing-box-sha256 '<64-character digest>' \
   --xray-archive ./Xray-linux-64.zip \
   --xray-sha256 '<64-character digest>' \
   --no-start
 ```
 
-The generic upstream sing-box 1.13.12 Linux assets do not include the
+The generic upstream sing-box 1.13.18 Linux assets do not include the
 `with_v2ray_api` build tag required for per-user accounting. The authoritative
 source pin, source checksum, small authenticated-user metadata patch, and build
 instructions live in `engine-patches/sing-box/`. The project engine uses

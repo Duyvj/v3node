@@ -52,8 +52,8 @@ The controller and project-built engine hashes remain explicit `UNPUBLISHED`
 placeholders until the first release is built. The installer fails closed while
 any required project-built hash is a placeholder. Local binaries/archives may
 be supplied only with explicit SHA256 values. sing-box source is pinned to
-version 1.13.12 and commit
-`1086ab2563320e0da0c23b3a491d8dfa0939dff4`; the project patchset is kept under
+version 1.13.18 and commit
+`45ca32dcb966f07f97fc888fe8586e359dbe8405`; the project patchset is kept under
 `engine-patches/sing-box/`, and the installer verifies that the engine reports
 the required build tags. Stock Xray is pinned to v26.3.27 official amd64/arm64
 ZIP assets with reviewed SHA256 values; the installer extracts only the expected
@@ -94,3 +94,81 @@ configuration with `v3node-tune remove`.
 The uninstaller removes only known managed executables and unit files by
 default. Configuration, credentials, state, and tuning are retained unless the
 operator explicitly requests their removal.
+
+## Anti-GFW and traffic camouflage
+
+No server configuration can guarantee that an address will never be detected
+or blocked. Blocking also depends on the client fingerprint, the public port,
+domain/SNI and certificate, the REALITY target, IP reputation, ASN and routing,
+traffic patterns, and active probes. Keep tested replacement nodes and monitor
+from inside the target network instead of treating one profile as permanent.
+
+The controller fails closed before either engine sees malformed REALITY
+secrets. The X25519 private key must be 32-byte raw URL-safe base64; short IDs
+must be even-length hexadecimal values of at most 8 bytes and unique after zero
+padding; server names cannot contain wildcards; and an optional ML-DSA-65 seed
+must be a distinct 32-byte raw URL-safe base64 value. This also prevents Xray
+v26.3.27 validation errors from echoing malformed private-key material into the
+service journal. Apple and iCloud targets/server names are rejected because the
+pinned Xray source explicitly warns that they can increase GFW blocking risk.
+
+Both renderers apply a five-minute REALITY `maxTimeDiff` replay window. VPS and
+client clocks therefore need working time synchronization. A deliberately empty
+short ID remains compatible but emits a warning; a random non-empty value is
+preferred. The pinned Xray source also warns when REALITY does not listen on
+port 443. v3node reports this warning rather than rejecting it because a public
+port 443 can legitimately be forwarded by NAT or a load balancer to a different
+internal node port.
+
+For a China-facing public node, the conservative starting profile is VLESS over
+TCP/raw with REALITY on external port 443. `xtls-rprx-vision` is accepted only
+with TCP/raw plus TLS/REALITY, or when VLESS Encryption is enabled. Choose a
+REALITY target whose accepted SNI and certificate SAN match the panel values;
+prefer a suitable target in the same ASN and test it with the pinned engine's
+`xray tls ping <target>:443`. Do not enable fixed fallback rate limits merely as
+camouflage: upstream notes that the limiter can itself become a fingerprint.
+When enabling ML-DSA, verify the target certificate length and post-quantum
+exchange support as required by the upstream REALITY documentation.
+
+Certificate TLS has a minimum of TLS 1.2 on both renderers. A public CA
+certificate and a coherent real web frontend are materially different from
+`cert_mode=self`; the managed self-signed mode is intended for explicit private
+trust and emits a public-listener warning. Likewise, `tls=1` with
+`cert_mode=none` means that v3node itself is serving plaintext. It is safe only
+when external TLS termination and network exposure have been independently
+verified.
+
+VLESS Encryption fields are validated against the pinned Xray grammar. Modes
+are limited to `native`, `xorpub`, or `random`; padding ranges are checked; and
+session tickets are limited to one hour because Xray retains per-session state
+for the ticket lifetime. A value of `0s` disables that retained 0-RTT state.
+Use the paired values produced by `xray vlessenc`; server-side changes cannot be
+made independently of subscription/client settings.
+
+Shadowsocks 2022 server keys are validated at their exact method length and the
+`none` method is rejected. The per-user credential conversion remains identical
+to the existing v2node/panel contract; changing it only on this server would
+disconnect every generated client. Direct Shadowsocks traffic still lacks an
+ordinary HTTPS appearance and should not be presented as an anti-blocking
+guarantee. On the Xray backend, Shadowsocks UDP also does not inherit the TCP
+transport's TLS/REALITY camouflage; v3node warns instead of silently disabling
+UDP and changing the panel contract.
+
+Inbound PROXY protocol is unauthenticated by design. When panel transport
+settings enable it, v3node emits a warning; firewall the backend listener so
+only the intended load balancer or reverse proxy can reach it. REALITY `xver`
+is a separate target-side PROXY protocol setting and is likewise reported.
+
+Xray v26.3.27 interprets `trustedXForwardedFor` entries as HTTP header names,
+not CIDRs, and trusts all X-Forwarded-For values when the list is empty. v3node
+therefore inserts an impossible header-name gate for WebSocket/XHTTP and rejects
+panel CIDR values until a newer pinned Xray version is separately audited. DNS
+queries from VPN users on both TCP and UDP port 53 are intercepted, but DNS
+routing protects resolver consistency/privacy only; it does not change the
+client fingerprint or prevent GFW classification.
+
+uTLS fingerprint selection, TLS fragmentation, record fragmentation, and TLS
+spoofing are client-side features. Adding those fields to an inbound would not
+make clients use them. sing-box also cautions that uTLS imitation can itself be
+fingerprinted. v3node deliberately leaves client fingerprint policy to the
+panel subscription and compatible client application.

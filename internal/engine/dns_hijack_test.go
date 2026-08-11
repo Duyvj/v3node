@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestSingBoxRenderHijacksClientUDP53(t *testing.T) {
+func TestSingBoxRenderHijacksClientTCPAndUDP53(t *testing.T) {
 	got, err := (SingBoxRenderer{}).Render(
 		baseNode(),
 		[]UserSpec{{ID: 7, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}},
@@ -23,14 +23,14 @@ func TestSingBoxRenderHijacksClientUDP53(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rule := range document.Route.Rules {
-		if rule["network"] == "udp" && rule["action"] == "hijack-dns" && numericListContains(rule["port"], 53) {
+		if stringListContains(rule["network"], "tcp") && stringListContains(rule["network"], "udp") && rule["action"] == "hijack-dns" && numericListContains(rule["port"], 53) {
 			return
 		}
 	}
-	t.Fatalf("rendered route has no UDP/53 DNS hijack: %#v", document.Route.Rules)
+	t.Fatalf("rendered route has no TCP/UDP 53 DNS hijack: %#v", document.Route.Rules)
 }
 
-func TestXrayRenderHijacksClientUDP53(t *testing.T) {
+func TestXrayRenderHijacksClientTCPAndUDP53(t *testing.T) {
 	got, err := (XrayRenderer{}).Render(
 		baseNode(),
 		[]UserSpec{{ID: 7, Credential: "48e90e76-2a72-46be-ac91-45d96486977a"}},
@@ -64,10 +64,10 @@ func TestXrayRenderHijacksClientUDP53(t *testing.T) {
 		t.Fatalf("rendered route has too few rules: %#v", document.Routing.Rules)
 	}
 	rule := document.Routing.Rules[1]
-	if rule["network"] == "udp" && rule["port"] == "53" && rule["outboundTag"] == DNSOutTag && stringListContains(rule["inboundTag"], InboundTag) {
+	if rule["network"] == "tcp,udp" && rule["port"] == "53" && rule["outboundTag"] == DNSOutTag && stringListContains(rule["inboundTag"], InboundTag) {
 		return
 	}
-	t.Fatalf("rendered route has no UDP/53 DNS hijack: %#v", document.Routing.Rules)
+	t.Fatalf("rendered route has no TCP/UDP 53 DNS hijack: %#v", document.Routing.Rules)
 }
 
 func stringListContains(value any, expected string) bool {
