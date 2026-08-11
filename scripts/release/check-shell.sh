@@ -158,7 +158,14 @@ for key in \
 done
 
 patchset=$(read_setting "$manifest" '' SING_BOX_PATCHSET)
-[[ $patchset != /* && $patchset != *'..'* && -f ${project_root}/${patchset} ]] || {
-    printf 'release manifest references an invalid sing-box patchset\n' >&2
+IFS=',' read -r -a patch_files <<<"$patchset"
+[[ ${#patch_files[@]} -gt 0 ]] || {
+    printf 'release manifest has an empty sing-box patchset\n' >&2
     exit 1
 }
+for patch_file in "${patch_files[@]}"; do
+    [[ $patch_file != /* && $patch_file != *'..'* && -f ${project_root}/${patch_file} ]] || {
+        printf 'release manifest references an invalid sing-box patch: %s\n' "$patch_file" >&2
+        exit 1
+    }
+done

@@ -33,9 +33,9 @@ readonly dist_path
 
 readonly controller_amd64=${dist_path}/v3node-linux-amd64
 readonly controller_arm64=${dist_path}/v3node-linux-arm64
-readonly sing_box_amd64=${dist_path}/v3node-edge-${SING_BOX_VERSION}-p1-linux-amd64
-readonly sing_box_arm64=${dist_path}/v3node-edge-${SING_BOX_VERSION}-p1-linux-arm64
-readonly sing_box_source=${dist_path}/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz
+readonly sing_box_amd64=${dist_path}/v3node-edge-${SING_BOX_VERSION}-p2-linux-amd64
+readonly sing_box_arm64=${dist_path}/v3node-edge-${SING_BOX_VERSION}-p2-linux-arm64
+readonly sing_box_source=${dist_path}/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz
 for file in \
     "$controller_amd64" \
     "$controller_arm64" \
@@ -183,7 +183,7 @@ assert_manifest \
 assert_manifest \
     "${dist_path}/release-manifest.env" \
     SING_BOX_PATCHSET \
-    engine-patches/sing-box/0001-expose-authenticated-user.patch
+    engine-patches/sing-box/0001-expose-authenticated-user.patch,engine-patches/sing-box/0002-bounded-user-rate-limit.patch
 
 for key in \
     XRAY_VERSION \

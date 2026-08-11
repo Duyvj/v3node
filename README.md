@@ -68,9 +68,9 @@ thể biểu diễn chính xác trên engine được chọn sẽ bị từ ch�
 đổi âm thầm.
 
 TLS và Reality được hỗ trợ khi panel cung cấp đủ trường bắt buộc. Hysteria2,
-TUIC và AnyTLS bắt buộc có TLS. Chế độ `auto` dùng Xray cho Shadowsocks legacy
-nhiều người dùng để giữ thống kê theo user, và dùng engine nhẹ cho Shadowsocks
-2022.
+TUIC và AnyTLS bắt buộc có TLS. Chế độ `auto` dùng engine sing-box đã patch cho
+Shadowsocks legacy/2022 và các cấu hình biểu diễn chính xác được; Xray được chọn
+khi transport, Reality hoặc route cần riêng khả năng của Xray.
 
 Chế độ TLS `file` dùng chứng thư do quản trị viên cấp và gia hạn; nếu panel bỏ
 trống đường dẫn, controller dùng quy ước `/etc/v3node/<protocol><node-id>.cer`
@@ -85,7 +85,7 @@ Các trạng thái cần hiểu rõ trong beta:
 | --- | --- |
 | Đồng bộ cấu hình/users, report upload/download | Đã triển khai; tiếp tục cần soak/load test |
 | Giới hạn thiết bị theo IP | Enforce trên sing-box; cấu hình Xray có `device_limit > 0` bị từ chối rõ ràng |
-| `speed_limit` theo từng user | Chưa có data plane đủ an toàn; giá trị khác 0 bị từ chối thay vì âm thầm bỏ qua |
+| `speed_limit` theo từng user | Enforce hữu hạn trên sing-box; cấu hình buộc dùng Xray có giá trị khác 0 bị từ chối rõ ràng |
 | Nhiều panel/node trong một process | Chưa có; mỗi cài đặt beta hiện quản lý một node |
 | Cập nhật user không ngắt phiên | Chưa có; thay đổi cấu hình có thể restart engine và làm client reconnect |
 | Traffic qua lúc thay engine | Có final drain trước khi đổi engine và checkpoint; vẫn cần soak test đối soát dài hạn |
@@ -106,6 +106,8 @@ cam kết một con số RAM cố định cho mọi VPS. Danh sách connection �
 streaming; toàn bộ IP chỉ được sort lúc seed policy, các vòng sau chỉ sort user
 thực sự có `device_limit`. Cấu hình engine dùng JSON compact và
 user struct thay vì một map động cho mỗi tài khoản để giảm heap spike khi reload.
+Limiter tốc độ chỉ tạo một token bucket cho user có giới hạn, dùng chung cho mọi
+phiên và cả hai chiều; kết nối mới không làm bảng limiter tăng vô hạn.
 
 Unit systemd không đặt hard RAM limit để tránh OOM-kill phiên hợp lệ khi tải tăng.
 Nó chạy bằng user `v3node`, chỉ có `CAP_NET_BIND_SERVICE`, bật accounting và giới
@@ -134,7 +136,9 @@ Dự án **không thể**:
 
 Nếu quốc gia bị nhận sai, cần yêu cầu nhà cung cấp IP và từng cơ sở dữ liệu GeoIP
 cập nhật, hoặc đổi IP/VPS. Controller không cung cấp nút cấu hình giả quốc gia;
-mọi egress vẫn đi trực tiếp bằng public IP thật của VPS.
+egress mặc định đi trực tiếp bằng public IP thật của VPS. Quản trị viên có thể
+chủ động cấu hình custom outbound Xray, khi đó IP đích nhìn thấy phụ thuộc vào
+outbound ấy thay vì IP của VPS.
 
 ## Cài độc lập
 

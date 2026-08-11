@@ -33,6 +33,15 @@ cleanup() {
 trap cleanup EXIT
 
 bash "${here}/fetch-sing-box-source.sh" "${work_directory}/source"
+# Release binaries are built from the same vendored dependency layout shipped
+# in Corresponding Source. Besides enabling a fully offline rebuild, this keeps
+# Go's embedded module build information bit-for-bit consistent.
+(
+    cd "${work_directory}/source"
+    GOTOOLCHAIN=local go mod download
+    GOTOOLCHAIN=local go mod verify
+    GOTOOLCHAIN=local go mod vendor
+)
 TARGET_GOOS=linux TARGET_GOARCH="$architecture" \
     bash "${project_root}/engine-patches/sing-box/build.sh" \
     "${work_directory}/source" \

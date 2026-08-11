@@ -203,14 +203,14 @@ jobs:
           mkdir -p dist
           bash scripts/release/build-sing-box.sh \
             "$TARGET_ARCH" \
-            "dist/v3node-edge-${SING_BOX_VERSION}-p1-linux-${TARGET_ARCH}"
+            "dist/v3node-edge-${SING_BOX_VERSION}-p2-linux-${TARGET_ARCH}"
 
       - name: Validate engine and rendered configurations
         env:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           source engine-patches/sing-box/UPSTREAM.env
-          binary=$(realpath "dist/v3node-edge-${SING_BOX_VERSION}-p1-linux-${TARGET_ARCH}")
+          binary=$(realpath "dist/v3node-edge-${SING_BOX_VERSION}-p2-linux-${TARGET_ARCH}")
           go version -m "$binary"
           go version -m "$binary" | grep -F ": go${GO_VERSION}"
           case "$TARGET_ARCH" in
@@ -232,14 +232,16 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-edge-${{ matrix.arch }}
-          path: dist/v3node-edge-*-p1-linux-${{ matrix.arch }}
+          path: dist/v3node-edge-*-p2-linux-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
 
   sing-box-source:
     name: GPL source archive
-    needs: preflight
+    needs:
+      - preflight
+      - sing-box
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -255,6 +257,12 @@ jobs:
           check-latest: false
           cache: true
 
+      - name: Download released amd64 engine for exact rebuild comparison
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-edge-amd64
+          path: release-edge-amd64
+
       - name: Package patched source twice and compare
         env:
           SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source-date-epoch }}
@@ -263,25 +271,25 @@ jobs:
           mkdir -p dist verify
           bash scripts/release/package-sing-box-source.sh \
             "$SOURCE_DATE_EPOCH" \
-            "dist/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz"
+            "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz"
           bash scripts/release/package-sing-box-source.sh \
             "$SOURCE_DATE_EPOCH" \
-            "verify/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz"
+            "verify/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz"
           cmp --silent \
-            "dist/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz" \
-            "verify/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz"
-          tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz" \
-            | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p1-source/LICENSE" >/dev/null
-          tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz" \
-            | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p1-source/V3NODE-BUILD-METADATA.txt" >/dev/null
-          tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz" \
-            | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p1-source/vendor/modules.txt" >/dev/null
+            "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz" \
+            "verify/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz"
+          tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz" \
+            | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p2-source/LICENSE" >/dev/null
+          tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz" \
+            | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p2-source/V3NODE-BUILD-METADATA.txt" >/dev/null
+          tar -tzf "dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz" \
+            | grep -Fx "v3node-edge-${SING_BOX_VERSION}-p2-source/vendor/modules.txt" >/dev/null
 
       - name: Rebuild packaged source without module downloads
         run: |
           source engine-patches/sing-box/UPSTREAM.env
-          archive="dist/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz"
-          source_root="offline/v3node-edge-${SING_BOX_VERSION}-p1-source"
+          archive="dist/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz"
+          source_root="offline/v3node-edge-${SING_BOX_VERSION}-p2-source"
           mkdir -p offline/module-cache offline/build-cache
           tar -xzf "$archive" -C offline
           GOPROXY=off \
@@ -299,12 +307,15 @@ jobs:
           fi
           file offline/v3node-edge-offline-linux-amd64 \
             | grep -Eq 'ELF 64-bit.*x86-64'
+          cmp --silent \
+            offline/v3node-edge-offline-linux-amd64 \
+            "release-edge-amd64/v3node-edge-${SING_BOX_VERSION}-p2-linux-amd64"
 
       - name: Upload corresponding GPL source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-edge-source
-          path: dist/v3node-edge-*-p1-source.tar.gz
+          path: dist/v3node-edge-*-p2-source.tar.gz
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

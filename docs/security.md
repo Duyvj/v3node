@@ -31,12 +31,15 @@ token and must not be copied into panel configuration. Connections JSON is
 stream-decoded under byte and item limits rather than decoded into an
 unbounded generic object tree.
 
-Both engines always reject VPN-user routes to the configured
-Stats/Connections loopback addresses and ports, even if
+Both engines install early rules which reject ordinary VPN-user routes to the
+configured Stats/Connections loopback addresses and ports, even if
 `network.block_private` is disabled. Xray's unauthenticated Stats gRPC listener
-therefore remains reachable only from the local service boundary. Filesystem
-or local-user compromise remains outside that boundary and can expose either
-local management credential.
+therefore remains reachable only from the local service boundary under the
+default direct/block/DNS routing policy. A panel-supplied custom Xray outbound
+is trusted administrator configuration and can itself proxy or redirect toward
+loopback, bypassing that route-layer guard; do not grant panel administration
+to an untrusted party. Filesystem or local-user compromise remains outside the
+service boundary and can expose either local management credential.
 
 ## Installer supply chain
 

@@ -8,6 +8,11 @@ readonly here
 # Resolved from the script's canonical directory.
 # shellcheck disable=SC1091
 source "${here}/UPSTREAM.env"
+patch_files=(
+    "${here}/0001-expose-authenticated-user.patch"
+    "${here}/0002-bounded-user-rate-limit.patch"
+)
+readonly patch_files
 
 [[ $# -eq 2 ]] || {
     printf 'Usage: %s SOURCE_DIRECTORY OUTPUT_BINARY\n' "$0" >&2
@@ -68,23 +73,26 @@ trap cleanup EXIT
         printf 'unexpected sing-box module path\n' >&2
         exit 1
     }
-    if patch --batch --forward --dry-run -p1 \
-        <"${here}/0001-expose-authenticated-user.patch" >/dev/null 2>&1; then
-        patch --batch --forward -p1 <"${here}/0001-expose-authenticated-user.patch"
-    elif patch --batch --reverse --dry-run -p1 \
-        <"${here}/0001-expose-authenticated-user.patch" >/dev/null 2>&1; then
-        printf 'sing-box source already contains the v3node patch\n'
-    else
-        printf 'sing-box patch does not apply cleanly in either direction\n' >&2
-        exit 1
-    fi
+    for patch_file in "${patch_files[@]}"; do
+        if patch --batch --forward --dry-run -p1 \
+            <"$patch_file" >/dev/null 2>&1; then
+            patch --batch --forward -p1 <"$patch_file"
+        elif patch --batch --reverse --dry-run -p1 \
+            <"$patch_file" >/dev/null 2>&1; then
+            printf 'sing-box source already contains %s\n' "$(basename -- "$patch_file")"
+        else
+            printf 'sing-box patch does not apply cleanly: %s\n' "$(basename -- "$patch_file")" >&2
+            exit 1
+        fi
+    done
     if [[ $module_mode == 'readonly' ]]; then
         GOTOOLCHAIN=local go mod verify
     fi
     env -u GOOS -u GOARCH CGO_ENABLED=1 GOTOOLCHAIN=local go test \
         -mod="$module_mode" \
         -tags "$SING_BOX_BUILD_TAGS" \
-        ./experimental/clashapi/trafficontrol
+        ./experimental/clashapi/trafficontrol \
+        ./experimental/v3node
 
     shared_ldflags=$(<release/LDFLAGS)
     readonly shared_ldflags

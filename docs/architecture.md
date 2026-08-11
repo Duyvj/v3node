@@ -38,23 +38,25 @@ isolation, independent upgrades, and clear license boundaries.
 
 Policy values are accepted only when the selected data plane can enforce them:
 
-- any user with `speed_limit > 0` makes the generation fail validation because
-  this release has no audited per-user shaper;
+- on the project sing-box engine, `speed_limit > 0` creates one configured,
+  shared upload/download token bucket for that user; the limiter map cannot
+  grow beyond the accepted user list;
 - a generation selected for stock Xray fails validation if any user has
-  `device_limit > 0`, because its Stats API does not expose the authenticated
-  source-IP information needed by this controller;
+  `speed_limit > 0` or `device_limit > 0`, because its Stats API exposes
+  neither a per-user shaper nor authenticated source-IP information;
 - on sing-box, the controller polls the authenticated Connections API about
   every five seconds, maps the engine username back to the panel user, tracks
   accepted source IPs in a bounded TTL/LRU set, and closes a connection whose
   new source IP would exceed the user's non-zero `device_limit`.
 
 The sing-box check is deliberately described as an IP limit, not a physical
-device limit. It takes effect after a connection exceeds the panel's
-`device_online_min_traffic` threshold and the next poll completes, so it is not
-an admission-time or instantaneous guarantee. Existing sessions from an
-already accepted IP do not consume another slot. When panel-side alive counts
-are available, the controller conservatively uses the greater of that count
-and its local live-IP count before accepting a new IP.
+device limit. It takes effect after the next Connections poll, so it is not an
+admission-time or instantaneous guarantee. The panel's
+`device_online_min_traffic` threshold affects reporting only; even a
+low-traffic accepted IP occupies a bounded local policy slot. Existing sessions
+from an already accepted IP do not consume another slot. When panel-side alive
+counts are available, the controller conservatively uses the greater of that
+count and its local live-IP count before accepting a new IP.
 
 The Connections response is decoded as a JSON stream with both item-count and
 body-size limits. The resulting bounded snapshot still occupies memory in

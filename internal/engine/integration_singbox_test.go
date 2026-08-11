@@ -50,6 +50,10 @@ func TestSingBoxOfficialBinary(t *testing.T) {
 			Cipher: "2022-blake3-aes-256-gcm", ServerKey: serverKey, TLS: TLSSpec{Mode: "none"},
 		},
 		{
+			Protocol: "shadowsocks", Listen: "127.0.0.1", Port: 20008, Transport: "tcp",
+			Cipher: "aes-128-gcm", TLS: TLSSpec{Mode: "none"},
+		},
+		{
 			Protocol: "hysteria2", Listen: "127.0.0.1", Port: 20005, Transport: "tcp",
 			UpMbps: 100, DownMbps: 100,
 			TLS: TLSSpec{Mode: "tls", ServerName: "example.test", CertificateFile: certPath, KeyFile: keyPath},
@@ -70,7 +74,11 @@ func TestSingBoxOfficialBinary(t *testing.T) {
 			if node.Protocol == "vmess" {
 				opts.DNSServers = []string{"tls://dns.example:8853", "https://dns.example/custom-query"}
 			}
-			rendered, err := (SingBoxRenderer{}).Render(node, []UserSpec{{ID: 9, Credential: credential}}, opts)
+			user := UserSpec{ID: 9, Credential: credential}
+			if node.Protocol == "vmess" {
+				user.SpeedLimit = 10
+			}
+			rendered, err := (SingBoxRenderer{}).Render(node, []UserSpec{user}, opts)
 			if err != nil {
 				t.Fatal(err)
 			}

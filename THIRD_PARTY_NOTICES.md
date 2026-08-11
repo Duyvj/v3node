@@ -107,6 +107,8 @@ release source/SBOM phải giữ nguyên tệp đó khi vendor source.
   `8b0d61adec28a16dbc3fc346bb82ab36fd64b879c9531be5e82c6b2af7582649`
 - Thay đổi dự án:
   [`0001-expose-authenticated-user.patch`](engine-patches/sing-box/0001-expose-authenticated-user.patch)
+  và
+  [`0002-bounded-user-rate-limit.patch`](engine-patches/sing-box/0002-bounded-user-rate-limit.patch)
 - License upstream: GPL version 3 hoặc mới hơn, kèm điều kiện bổ sung nguyên văn
   trong [`UPSTREAM_LICENSE`](engine-patches/sing-box/UPSTREAM_LICENSE).
 - Toàn văn GPLv3: [`LICENSES/GPL-3.0.txt`](LICENSES/GPL-3.0.txt).

@@ -1,0 +1,237 @@
+diff --git a/box.go b/box.go
+--- a/box.go
++++ b/box.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/sagernet/sing-box/dns"
+ 	"github.com/sagernet/sing-box/experimental"
+ 	"github.com/sagernet/sing-box/experimental/cachefile"
++	v3nodeTraffic "github.com/sagernet/sing-box/experimental/v3node"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-box/protocol/direct"
+@@ -366,6 +367,13 @@ func New(options Options) (*Box, error) {
+ 			service.MustRegister[adapter.V2RayServer](ctx, v2rayServer)
+ 		}
+ 	}
++	if experimentalOptions.V3Node != nil {
++		trafficLimiter, err := v3nodeTraffic.NewTracker(*experimentalOptions.V3Node)
++		if err != nil {
++			return nil, E.Cause(err, "create v3node traffic limiter")
++		}
++		router.AppendTracker(trafficLimiter)
++	}
+ 	if ntpOptions.Enabled {
+ 		ntpDialer, err := dialer.New(ctx, ntpOptions.DialerOptions, ntpOptions.ServerIsDomain())
+ 		if err != nil {
+diff --git a/option/experimental.go b/option/experimental.go
+--- a/option/experimental.go
++++ b/option/experimental.go
+@@ -6,9 +6,17 @@ type ExperimentalOptions struct {
+ 	CacheFile *CacheFileOptions `json:"cache_file,omitempty"`
+ 	ClashAPI  *ClashAPIOptions  `json:"clash_api,omitempty"`
+ 	V2RayAPI  *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
++	V3Node    *V3NodeOptions    `json:"v3node,omitempty"`
+ 	Debug     *DebugOptions     `json:"debug,omitempty"`
+ }
+ 
++type V3NodeOptions struct {
++	// UserRates maps authenticated user names to a combined upload/download
++	// byte-per-second rate. The map is immutable after startup and therefore
++	// remains bounded by the rendered configuration size.
++	UserRates map[string]int64 `json:"user_rates,omitempty"`
++}
++
+ type CacheFileOptions struct {
+ 	Enabled     bool               `json:"enabled,omitempty"`
+ 	Path        string             `json:"path,omitempty"`
+diff --git a/experimental/v3node/tracker.go b/experimental/v3node/tracker.go
+new file mode 100644
+--- /dev/null
++++ b/experimental/v3node/tracker.go
+@@ -0,0 +1,126 @@
++package v3node
++
++import (
++	"context"
++	"errors"
++	"math"
++	"net"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"golang.org/x/time/rate"
++)
++
++var _ adapter.ConnectionTracker = (*Tracker)(nil)
++
++// Tracker applies one shared token bucket to every connection belonging to an
++// authenticated user. Its only persistent state is the immutable configured
++// user map, so connection churn cannot grow the map.
++type Tracker struct {
++	users map[string]*userLimiter
++}
++
++type userLimiter struct {
++	limiter *rate.Limiter
++	burst   int
++}
++
++func NewTracker(options option.V3NodeOptions) (*Tracker, error) {
++	users := make(map[string]*userLimiter, len(options.UserRates))
++	for user, bytesPerSecond := range options.UserRates {
++		if user == "" || len(user) > 4096 {
++			return nil, errors.New("invalid v3node rate-limit user")
++		}
++		if bytesPerSecond <= 0 {
++			return nil, errors.New("v3node user rate must be positive")
++		}
++		burst64 := bytesPerSecond
++		if burst64 > int64(math.MaxInt) {
++			burst64 = int64(math.MaxInt)
++		}
++		burst := int(burst64)
++		users[user] = &userLimiter{
++			limiter: rate.NewLimiter(rate.Limit(bytesPerSecond), burst),
++			burst:   burst,
++		}
++	}
++	return &Tracker{users: users}, nil
++}
++
++func (t *Tracker) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) net.Conn {
++	limiter := t.users[metadata.User]
++	if limiter == nil {
++		return conn
++	}
++	return &limitedConn{Conn: conn, ctx: ctx, limiter: limiter}
++}
++
++func (t *Tracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
++	limiter := t.users[metadata.User]
++	if limiter == nil {
++		return conn
++	}
++	return &limitedPacketConn{PacketConn: conn, ctx: ctx, limiter: limiter}
++}
++
++func (l *userLimiter) wait(ctx context.Context, bytes int) error {
++	for bytes > 0 {
++		chunk := min(bytes, l.burst)
++		if err := l.limiter.WaitN(ctx, chunk); err != nil {
++			return err
++		}
++		bytes -= chunk
++	}
++	return nil
++}
++
++type limitedConn struct {
++	net.Conn
++	ctx     context.Context
++	limiter *userLimiter
++}
++
++func (c *limitedConn) Read(buffer []byte) (int, error) {
++	n, err := c.Conn.Read(buffer)
++	if n > 0 {
++		if waitErr := c.limiter.wait(c.ctx, n); waitErr != nil && err == nil {
++			err = waitErr
++		}
++	}
++	return n, err
++}
++
++func (c *limitedConn) Write(buffer []byte) (int, error) {
++	if err := c.limiter.wait(c.ctx, len(buffer)); err != nil {
++		return 0, err
++	}
++	return c.Conn.Write(buffer)
++}
++
++type limitedPacketConn struct {
++	N.PacketConn
++	ctx     context.Context
++	limiter *userLimiter
++}
++
++func (c *limitedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
++	before := buffer.Len()
++	destination, err := c.PacketConn.ReadPacket(buffer)
++	if size := buffer.Len() - before; size > 0 {
++		if waitErr := c.limiter.wait(c.ctx, size); waitErr != nil && err == nil {
++			err = waitErr
++		}
++	}
++	return destination, err
++}
++
++func (c *limitedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
++	if err := c.limiter.wait(c.ctx, buffer.Len()); err != nil {
++		return err
++	}
++	return c.PacketConn.WritePacket(buffer, destination)
++}
+diff --git a/experimental/v3node/tracker_test.go b/experimental/v3node/tracker_test.go
+new file mode 100644
+--- /dev/null
++++ b/experimental/v3node/tracker_test.go
+@@ -0,0 +1,55 @@
++package v3node
++
++import (
++	"context"
++	"net"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/option"
++)
++
++func TestTrackerKeepsStateBoundedToConfiguredUsers(t *testing.T) {
++	tracker, err := NewTracker(option.V3NodeOptions{UserRates: map[string]int64{"uid-1": 125000}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for index := 0; index < 1000; index++ {
++		left, right := net.Pipe()
++		wrapped := tracker.RoutedConnection(context.Background(), left, adapter.InboundContext{User: "unknown"}, nil, nil)
++		if wrapped != left {
++			t.Fatal("unconfigured user was wrapped")
++		}
++		_ = left.Close()
++		_ = right.Close()
++	}
++	if len(tracker.users) != 1 {
++		t.Fatalf("limiter map grew to %d entries", len(tracker.users))
++	}
++}
++
++func TestTrackerSharesLimiterAcrossConnections(t *testing.T) {
++	tracker, err := NewTracker(option.V3NodeOptions{UserRates: map[string]int64{"uid-1": 125000}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	leftOne, rightOne := net.Pipe()
++	leftTwo, rightTwo := net.Pipe()
++	defer leftOne.Close()
++	defer rightOne.Close()
++	defer leftTwo.Close()
++	defer rightTwo.Close()
++	one := tracker.RoutedConnection(context.Background(), leftOne, adapter.InboundContext{User: "uid-1"}, nil, nil).(*limitedConn)
++	two := tracker.RoutedConnection(context.Background(), leftTwo, adapter.InboundContext{User: "uid-1"}, nil, nil).(*limitedConn)
++	if one.limiter != two.limiter {
++		t.Fatal("connections for one user did not share a limiter")
++	}
++}
++
++func TestTrackerRejectsInvalidRates(t *testing.T) {
++	for _, rates := range []map[string]int64{{"": 1}, {"uid-1": 0}, {"uid-1": -1}} {
++		if _, err := NewTracker(option.V3NodeOptions{UserRates: rates}); err == nil {
++			t.Fatalf("accepted invalid rates %#v", rates)
++		}
++	}
++}

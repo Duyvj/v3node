@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type SingBoxRenderer struct{}
@@ -65,8 +67,8 @@ func (SingBoxRenderer) Supports(node NodeSpec) error {
 	if node.TLS.MLDSA65Seed != "" || node.TLS.Xver != 0 {
 		return errors.New("Reality ML-DSA/xver settings require the Xray backend")
 	}
-	if node.TLS.Mode == "reality" && len(node.TLS.ServerNames) > 1 {
-		return errors.New("Reality with multiple server names requires the Xray backend")
+	if node.TLS.Mode == "reality" && !singBoxRealityServerNamesEquivalent(node.TLS) {
+		return errors.New("Reality server_names cannot be represented by the sing-box backend; use Xray")
 	}
 	if err := singBoxTransportSettingsCompatible(node.Transport, node.TransportSettings); err != nil {
 		return err
@@ -106,6 +108,7 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 	}
 	userNames := make([]string, 0, len(users))
 	userMap := make(map[string]int, len(users))
+	userRates := make(map[string]int64)
 	engineUsers := make([]singBoxUserConfig, 0, len(users))
 	for _, user := range users {
 		name := userName(user.ID)
@@ -116,6 +119,12 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 		engineUsers = append(engineUsers, entry)
 		userNames = append(userNames, name)
 		userMap[name] = user.ID
+		if user.SpeedLimit > 0 {
+			if user.SpeedLimit > math.MaxInt64/125_000 {
+				return Rendered{}, fmt.Errorf("user %d speed limit is too large", user.ID)
+			}
+			userRates[name] = int64(user.SpeedLimit) * 125_000
+		}
 	}
 
 	switch node.Protocol {
@@ -126,13 +135,10 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 				return Rendered{}, errors.New("Shadowsocks 2022 requires server_key")
 			}
 			inbound["password"] = node.ServerKey
-			inbound["users"] = engineUsers
-		} else {
-			if len(users) != 1 {
-				return Rendered{}, errors.New("sing-box supports one password for legacy Shadowsocks; use Shadowsocks 2022 for multi-user nodes")
-			}
-			inbound["password"] = users[0].Credential
 		}
+		// The multi-user service supports both legacy AEAD and Shadowsocks 2022
+		// and preserves authenticated user names for accounting/policy.
+		inbound["users"] = engineUsers
 	default:
 		inbound["users"] = engineUsers
 	}
@@ -192,6 +198,22 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 		dnsServers = append(dnsServers, map[string]any{"type": "local", "tag": "system-dns"})
 	}
 
+	experimental := map[string]any{
+		"v2ray_api": map[string]any{
+			"listen": opts.StatsListen,
+			"stats": map[string]any{
+				"enabled": true,
+				"users":   userNames,
+			},
+		},
+		"clash_api": map[string]any{
+			"external_controller": opts.ClashListen,
+			"secret":              opts.ClashSecret,
+		},
+	}
+	if len(userRates) > 0 {
+		experimental["v3node"] = map[string]any{"user_rates": userRates}
+	}
 	doc := map[string]any{
 		"log": map[string]any{
 			"level":     normalizeLogLevel(opts.LogLevel),
@@ -211,19 +233,7 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 			"rules": routeRules,
 			"final": DirectTag,
 		},
-		"experimental": map[string]any{
-			"v2ray_api": map[string]any{
-				"listen": opts.StatsListen,
-				"stats": map[string]any{
-					"enabled": true,
-					"users":   userNames,
-				},
-			},
-			"clash_api": map[string]any{
-				"external_controller": opts.ClashListen,
-				"secret":              opts.ClashSecret,
-			},
-		},
+		"experimental": experimental,
 	}
 	data, err := encodeJSON(doc)
 	if err != nil {
@@ -345,6 +355,11 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 		for _, key := range []string{"path", "headers", "maxEarlyData", "earlyDataHeaderName"} {
 			known[key] = struct{}{}
 		}
+		if pathValue, _ := settings["path"].(string); pathValue != "" {
+			if _, _, err := singBoxWebSocketPath(pathValue); err != nil {
+				return err
+			}
+		}
 	case "grpc":
 		for _, key := range []string{
 			"serviceName", "service_name", "idle_timeout", "idleTimeout",
@@ -358,12 +373,26 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 				return errors.New("gRPC multiMode requires the Xray backend")
 			}
 		}
+		for _, keys := range [][]string{
+			{"idle_timeout", "idleTimeout"},
+			{"health_check_timeout", "healthCheckTimeout"},
+		} {
+			if _, _, err := singBoxDurationSetting(settings, keys); err != nil {
+				return err
+			}
+		}
 	case "httpupgrade":
 		for _, key := range []string{"host", "path", "headers", "header"} {
 			known[key] = struct{}{}
 		}
-		if pathValue, _ := settings["path"].(string); webSocketEarlyData(pathValue) > 0 {
-			return errors.New("HTTPUpgrade early data requires the Xray backend")
+		if pathValue, _ := settings["path"].(string); pathValue != "" {
+			parsed, err := url.Parse(pathValue)
+			if err != nil {
+				return fmt.Errorf("parse HTTPUpgrade path: %w", err)
+			}
+			if parsed.RawQuery != "" || parsed.Fragment != "" {
+				return errors.New("HTTPUpgrade path query/fragment requires the Xray backend")
+			}
 		}
 	case "http":
 		for _, key := range []string{"path", "host", "headers"} {
@@ -381,16 +410,84 @@ func singBoxTransportSettingsCompatible(kind string, raw json.RawMessage) error 
 }
 
 func webSocketEarlyData(pathValue string) int64 {
+	_, earlyData, _ := singBoxWebSocketPath(pathValue)
+	return earlyData
+}
+
+func singBoxRealityServerNamesEquivalent(spec TLSSpec) bool {
+	switch len(spec.ServerNames) {
+	case 0:
+		return true
+	case 1:
+		return spec.ServerName == spec.ServerNames[0]
+	default:
+		return false
+	}
+}
+
+func singBoxWebSocketPath(pathValue string) (string, int64, error) {
 	parsed, err := url.Parse(pathValue)
 	if err != nil {
-		return 0
+		return "", 0, fmt.Errorf("parse WebSocket path: %w", err)
 	}
-	value := parsed.Query().Get("ed")
-	parsedValue, err := strconv.ParseInt(value, 10, 32)
-	if err != nil || parsedValue <= 0 {
-		return 0
+	if parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", 0, errors.New("WebSocket path URL/fragment requires the Xray backend")
 	}
-	return parsedValue
+	if parsed.RawQuery == "" {
+		return parsed.Path, 0, nil
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil || len(query) != 1 {
+		return "", 0, errors.New("WebSocket path query requires the Xray backend")
+	}
+	values, ok := query["ed"]
+	if !ok || len(values) != 1 {
+		return "", 0, errors.New("WebSocket path query requires the Xray backend")
+	}
+	earlyData, err := strconv.ParseInt(values[0], 10, 32)
+	if err != nil || earlyData <= 0 {
+		return "", 0, errors.New("WebSocket ed query must be one positive 32-bit integer")
+	}
+	return parsed.Path, earlyData, nil
+}
+
+func singBoxDurationSetting(settings map[string]any, keys []string) (string, bool, error) {
+	for _, key := range keys {
+		value, exists := settings[key]
+		if !exists {
+			continue
+		}
+		switch typed := value.(type) {
+		case json.Number:
+			seconds, err := typed.Int64()
+			if err != nil || seconds < 0 || seconds > int64(^uint32(0)>>1) {
+				return "", false, fmt.Errorf("gRPC %s must be a non-negative 32-bit integer number of seconds", key)
+			}
+			if seconds == 0 {
+				return "", false, nil
+			}
+			return (time.Duration(seconds) * time.Second).String(), true, nil
+		case string:
+			text := strings.TrimSpace(typed)
+			if text == "" {
+				return "", false, nil
+			}
+			if seconds, err := strconv.ParseInt(text, 10, 32); err == nil {
+				if seconds <= 0 {
+					return "", false, nil
+				}
+				return (time.Duration(seconds) * time.Second).String(), true, nil
+			}
+			duration, err := time.ParseDuration(text)
+			if err != nil || duration <= 0 {
+				return "", false, fmt.Errorf("gRPC %s must be a positive duration or seconds", key)
+			}
+			return duration.String(), true, nil
+		default:
+			return "", false, fmt.Errorf("gRPC %s must be a duration string or integer seconds", key)
+		}
+	}
+	return "", false, nil
 }
 
 func acceptsProxyProtocol(raw json.RawMessage) bool {
@@ -428,30 +525,35 @@ func singBoxTransport(kind string, raw json.RawMessage) (map[string]any, error) 
 	switch kind {
 	case "ws":
 		if pathValue, ok := settings["path"].(string); ok && pathValue != "" {
-			parsed, parseErr := url.Parse(pathValue)
-			if parseErr != nil {
-				return nil, fmt.Errorf("parse WebSocket path: %w", parseErr)
+			path, earlyData, pathErr := singBoxWebSocketPath(pathValue)
+			if pathErr != nil {
+				return nil, pathErr
 			}
-			query := parsed.Query()
-			if earlyData := webSocketEarlyData(pathValue); earlyData > 0 {
+			if earlyData > 0 {
 				if _, configured := settings["maxEarlyData"]; !configured {
 					result["max_early_data"] = earlyData
 				}
 				if _, configured := settings["earlyDataHeaderName"]; !configured {
 					result["early_data_header_name"] = "Sec-WebSocket-Protocol"
 				}
-				query.Del("ed")
-				parsed.RawQuery = query.Encode()
 			}
-			result["path"] = parsed.String()
+			result["path"] = path
 		}
 		copyMap(settings, result, "headers", "headers")
 		copyNumber(settings, result, "maxEarlyData", "max_early_data")
 		copyString(settings, result, "earlyDataHeaderName", "early_data_header_name")
 	case "grpc":
 		copyStringAny(settings, result, []string{"serviceName", "service_name"}, "service_name")
-		copyStringAny(settings, result, []string{"idle_timeout", "idleTimeout"}, "idle_timeout")
-		copyStringAny(settings, result, []string{"health_check_timeout", "healthCheckTimeout"}, "ping_timeout")
+		if value, present, durationErr := singBoxDurationSetting(settings, []string{"idle_timeout", "idleTimeout"}); durationErr != nil {
+			return nil, durationErr
+		} else if present {
+			result["idle_timeout"] = value
+		}
+		if value, present, durationErr := singBoxDurationSetting(settings, []string{"health_check_timeout", "healthCheckTimeout"}); durationErr != nil {
+			return nil, durationErr
+		} else if present {
+			result["ping_timeout"] = value
+		}
 		copyBoolAny(settings, result, []string{"permit_without_stream", "permitWithoutStream"}, "permit_without_stream")
 	case "httpupgrade":
 		copyString(settings, result, "host", "host")

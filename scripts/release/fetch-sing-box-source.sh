@@ -112,8 +112,11 @@ grep -Fqx 'module github.com/sagernet/sing-box' "${source_directory}/go.mod" || 
 }
 
 if [[ $apply_patch == true ]]; then
-    patch --batch --forward -d "$source_directory" -p1 \
-        <"${project_root}/engine-patches/sing-box/0001-expose-authenticated-user.patch"
+    for patch_file in \
+        "${project_root}/engine-patches/sing-box/0001-expose-authenticated-user.patch" \
+        "${project_root}/engine-patches/sing-box/0002-bounded-user-rate-limit.patch"; do
+        patch --batch --forward -d "$source_directory" -p1 <"$patch_file"
+    done
 fi
 
 mv -- "$source_directory" "$destination_path"

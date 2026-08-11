@@ -40,7 +40,7 @@ accepted.
 | VMess | beta | beta |
 | VLESS | beta | beta |
 | Trojan | beta | beta |
-| Shadowsocks | beta (2022) | beta (legacy and AES-based 2022) |
+| Shadowsocks | beta (legacy and 2022) | beta (legacy and AES-based 2022) |
 | Hysteria2 | beta | not supported by this adapter |
 | TUIC | beta | not supported by this adapter |
 | AnyTLS | beta | not supported by this adapter |
@@ -49,9 +49,10 @@ The sing-box adapter accepts TCP/raw, WebSocket, gRPC, HTTPUpgrade and HTTP as
 appropriate for the selected protocol. The Xray adapter accepts TCP/raw,
 WebSocket, gRPC, HTTPUpgrade and XHTTP/SplitHTTP for VMess, VLESS and Trojan,
 plus TCP/raw for Shadowsocks. `auto` selects Xray for XHTTP/SplitHTTP,
-trusted X-Forwarded-For, legacy multi-user Shadowsocks, and panel rules that
-reference Xray `geoip:`, `geosite:`, or `ext:` assets; it selects the lighter
-project engine for Shadowsocks 2022 and the remaining supported nodes.
+trusted X-Forwarded-For, transport/settings that sing-box cannot represent,
+and panel rules that reference Xray `geoip:`, `geosite:`, or `ext:` assets; it
+selects the lighter project engine for Shadowsocks and the remaining supported
+nodes.
 Panel settings that cannot be represented exactly are rejected
 with a clear error and are never silently approximated.
 
@@ -79,20 +80,24 @@ claim. Production gates still include live concurrent load, reconnect behavior,
 long-running memory observation, and measured accounting across engine
 replacement for each protocol/transport combination.
 
-Per-user speed limits are parsed but this release has no audited data-plane
-enforcement. A non-zero `speed_limit` therefore fails validation rather than
-being silently ignored. Online-IP collection and device-limit closure use the
-authenticated sing-box Connections API. Its random 256-bit bearer secret is
-kept in `/var/lib/v3node/api.secret`, independently of the panel token. The
-response is decoded as a bounded JSON stream, with limits on both bytes and
-connection records.
+On the project sing-box engine, `speed_limit` is enforced by one shared token
+bucket per configured user across upload, download and all concurrent TCP/UDP
+sessions. Only users with a non-zero limit allocate a bucket, and the immutable
+map is bounded by `runtime.max_users`; connection churn cannot add entries.
+Stock Xray has no equivalent audited hook, so a generation that requires Xray
+and contains a non-zero speed limit fails validation. Online-IP collection and
+device-limit closure use the authenticated sing-box Connections API. Its random
+256-bit bearer secret is kept in `/var/lib/v3node/api.secret`, independently of
+the panel token. The response is decoded as a bounded JSON stream, with limits
+on both bytes and connection records.
 
 On sing-box, a `device_limit` is an IP-based policy. About every five seconds,
 the controller closes a connection from a newly observed source IP when that
-IP would exceed the limit, after the connection passes the panel's
-`device_online_min_traffic` threshold. Enforcement is consequently eventual,
-not an admission-time guarantee, and multiple devices behind one NAT appear as
-one IP. Stock Xray has no equivalent source-IP/user hook, so an Xray generation
+IP would exceed the limit. `device_online_min_traffic` controls when an accepted
+IP becomes reportable to the panel, not whether it occupies a local policy
+slot. Enforcement is consequently eventual, not an admission-time guarantee,
+and multiple devices behind one NAT appear as one IP. Stock Xray has no
+equivalent source-IP/user hook, so an Xray generation
 containing a non-zero `device_limit` also fails validation. These are explicit
 compatibility boundaries, not claims that unsupported limits were applied.
 

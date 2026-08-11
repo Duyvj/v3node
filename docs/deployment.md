@@ -14,12 +14,12 @@ explicitly:
 
 ```bash
 sha256sum ./v3node-linux-amd64
-sha256sum ./v3node-edge-1.13.12-p1-linux-amd64
+sha256sum ./v3node-edge-1.13.12-p2-linux-amd64
 sha256sum ./Xray-linux-64.zip
 sudo ./deploy/install.sh \
   --v3node-file ./v3node-linux-amd64 \
   --v3node-sha256 '<64-character digest>' \
-  --sing-box-file ./v3node-edge-1.13.12-p1-linux-amd64 \
+  --sing-box-file ./v3node-edge-1.13.12-p2-linux-amd64 \
   --sing-box-sha256 '<64-character digest>' \
   --xray-archive ./Xray-linux-64.zip \
   --xray-sha256 '<64-character digest>' \
@@ -139,9 +139,9 @@ these legacy paths:
 Prepare a new `config.json` from this release's `config.example.json`. Map the
 old `ApiHost` to `panel.url` and `NodeID` to `panel.node_id`; put the old
 `ApiKey` only in the separate `panel.token` referenced by `panel.token_file`.
-Review policy compatibility before cutover: any non-zero `speed_limit` is
-rejected, and a node selected for stock Xray is also rejected if any user has a
-non-zero `device_limit`.
+Review policy compatibility before cutover: sing-box enforces non-zero
+`speed_limit` and `device_limit`, while a node whose settings require stock
+Xray is rejected if either policy is non-zero.
 
 Install v3node without starting its listener while legacy v2node is still
 serving, then validate the panel and rendered engine configuration:

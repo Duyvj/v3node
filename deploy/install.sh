@@ -15,8 +15,8 @@ readonly SING_BOX_VERSION=1.13.12
 readonly SING_BOX_COMMIT=1086ab2563320e0da0c23b3a491d8dfa0939dff4
 readonly SING_BOX_BUILD_TAGS=with_quic,with_grpc,with_v2ray_api,with_clash_api,with_utls
 readonly SING_BOX_RELEASE_BASE=$V3NODE_RELEASE_BASE
-readonly SING_BOX_AMD64_ASSET=v3node-edge-1.13.12-p1-linux-amd64
-readonly SING_BOX_ARM64_ASSET=v3node-edge-1.13.12-p1-linux-arm64
+readonly SING_BOX_AMD64_ASSET=v3node-edge-1.13.12-p2-linux-amd64
+readonly SING_BOX_ARM64_ASSET=v3node-edge-1.13.12-p2-linux-arm64
 readonly SING_BOX_AMD64_SHA256=UNPUBLISHED_REPLACE_WITH_64_HEX_SHA256
 readonly SING_BOX_ARM64_SHA256=UNPUBLISHED_REPLACE_WITH_64_HEX_SHA256
 
@@ -80,7 +80,7 @@ Usage: install.sh [options]
   --v3node-file FILE        Use a local controller binary instead of the
                             versioned release asset.
   --v3node-sha256 SHA256    Required SHA256 for --v3node-file.
-  --sing-box-file FILE      Use a project-built sing-box 1.13.12-p1 binary.
+  --sing-box-file FILE      Use a project-built sing-box 1.13.12-p2 binary.
   --sing-box-sha256 SHA256  Required SHA256 for --sing-box-file.
   --xray-archive FILE       Use a local official Xray ZIP archive.
   --xray-sha256 SHA256      Required SHA256 for --xray-archive.
@@ -278,7 +278,7 @@ snapshot_regular_input() {
 }
 
 verify_sing_box_features() {
-    local binary=$1 output line tags='' tag
+    local binary=$1 output line tags='' tag rate_probe
     local -a required_tags
     output=$("$binary" version) || die 'verified sing-box binary cannot run on this host'
     grep -Fqx "sing-box version ${SING_BOX_VERSION}" <<<"$output" || die "sing-box binary is not version ${SING_BOX_VERSION}"
@@ -295,6 +295,12 @@ verify_sing_box_features() {
     for tag in "${required_tags[@]}"; do
         [[ ,$tags, == *,$tag,* ]] || die "sing-box binary is missing required build tag: ${tag}"
     done
+    rate_probe=$(mktemp "${stage_dir}/sing-box-rate-probe.XXXXXX.json")
+    cat >"$rate_probe" <<'RATE_PROBE_EOF'
+{"log":{"level":"error"},"inbounds":[{"type":"mixed","tag":"probe-in","listen":"127.0.0.1","listen_port":65535}],"outbounds":[{"type":"direct","tag":"probe-out"}],"route":{"final":"probe-out"},"experimental":{"v3node":{"user_rates":{"probe-user":125000}}}}
+RATE_PROBE_EOF
+    "$binary" check -c "$rate_probe" >/dev/null 2>&1 || die 'sing-box binary is missing the v3node bounded rate-policy patch'
+    rm -f -- "$rate_probe"
 }
 
 verify_xray_features() {
@@ -564,14 +570,14 @@ CONFIG_EOF
 
 write_engine_notice() {
     cat >"$stage_dir/NOTICE-edge-engine" <<EOF
-v3node edge engine ${SING_BOX_VERSION}-p1
+v3node edge engine ${SING_BOX_VERSION}-p2
 
 This separately executed data-plane binary is built from upstream source at:
 https://github.com/SagerNet/sing-box/commit/${SING_BOX_COMMIT}
 
 The exact Corresponding Source, project patch, vendored linked module source,
 build instructions and license for this binary are published alongside it at:
-${V3NODE_RELEASE_BASE}/v3node-edge-${SING_BOX_VERSION}-p1-source.tar.gz
+${V3NODE_RELEASE_BASE}/v3node-edge-${SING_BOX_VERSION}-p2-source.tar.gz
 
 The controller is not endorsed by or associated with the upstream project.
 EOF

@@ -156,18 +156,12 @@ func Select(requested string, node NodeSpec) (Renderer, error) {
 		return xray, nil
 	case "", "auto":
 		// SplitHTTP/XHTTP are Xray transports. QUIC-native protocols and
-		// Shadowsocks 2022 are handled by sing-box. Stock Xray preserves
-		// legacy Shadowsocks multi-user accounting that sing-box cannot expose.
+		// Shadowsocks are handled by the project's sing-box build, which exposes
+		// authenticated users for bounded online/device and rate policies.
 		// Xray also owns panel routes that explicitly reference its GeoIP/
 		// GeoSite asset syntax; treating those strings as ordinary domains in
 		// sing-box would silently change policy semantics.
 		if node.Transport == "xhttp" || node.Transport == "splithttp" || len(node.TrustedXForwardedFor) > 0 || requiresXrayGeodata(node.Routes) {
-			if err := xray.Supports(node); err != nil {
-				return nil, err
-			}
-			return xray, nil
-		}
-		if node.Protocol == "shadowsocks" && !isShadowsocks2022(node.Cipher) {
 			if err := xray.Supports(node); err != nil {
 				return nil, err
 			}
@@ -232,6 +226,9 @@ func ValidateSpec(node NodeSpec, users []UserSpec) error {
 	for _, user := range users {
 		if user.ID <= 0 || strings.TrimSpace(user.Credential) == "" {
 			return errors.New("every user needs a positive ID and non-empty credential")
+		}
+		if user.SpeedLimit < 0 || user.DeviceLimit < 0 {
+			return fmt.Errorf("user %d has a negative policy limit", user.ID)
 		}
 		if _, ok := seenID[user.ID]; ok {
 			return fmt.Errorf("duplicate user ID %d", user.ID)

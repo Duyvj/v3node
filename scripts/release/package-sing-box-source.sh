@@ -36,7 +36,7 @@ output_directory=$(unset CDPATH; cd -- "$(dirname -- "$output")" && pwd)
 readonly output_directory
 output_path=${output_directory}/$(basename -- "$output")
 readonly output_path
-readonly archive_root=v3node-edge-${SING_BOX_VERSION}-p1-source
+readonly archive_root=v3node-edge-${SING_BOX_VERSION}-p2-source
 work_directory=$(mktemp -d "${output_directory}/.sing-box-package.XXXXXX")
 temporary_output=$(mktemp "${output_directory}/.sing-box-source.XXXXXX")
 cleanup() {
@@ -62,6 +62,9 @@ install -m 0644 \
     "${project_root}/engine-patches/sing-box/0001-expose-authenticated-user.patch" \
     "${source_directory}/V3NODE-PATCHES/0001-expose-authenticated-user.patch"
 install -m 0644 \
+    "${project_root}/engine-patches/sing-box/0002-bounded-user-rate-limit.patch" \
+    "${source_directory}/V3NODE-PATCHES/0002-bounded-user-rate-limit.patch"
+install -m 0644 \
     "${project_root}/engine-patches/sing-box/UPSTREAM.env" \
     "${source_directory}/V3NODE-PATCHES/UPSTREAM.env"
 install -m 0644 \
@@ -79,15 +82,18 @@ install -m 0644 \
 install -m 0755 \
     "${project_root}/engine-patches/sing-box/build.sh" \
     "${source_directory}/V3NODE-PATCHES/build.sh"
-patch_sha256=$(sha256sum "${project_root}/engine-patches/sing-box/0001-expose-authenticated-user.patch" | awk '{print $1}')
-readonly patch_sha256
+patch_one_sha256=$(sha256sum "${project_root}/engine-patches/sing-box/0001-expose-authenticated-user.patch" | awk '{print $1}')
+readonly patch_one_sha256
+patch_two_sha256=$(sha256sum "${project_root}/engine-patches/sing-box/0002-bounded-user-rate-limit.patch" | awk '{print $1}')
+readonly patch_two_sha256
 {
     printf 'Upstream: https://github.com/SagerNet/sing-box\n'
     printf 'Version: %s\n' "$SING_BOX_VERSION"
     printf 'Commit: %s\n' "$SING_BOX_COMMIT"
     printf 'Source URL: %s\n' "$SING_BOX_SOURCE_URL"
     printf 'Upstream source SHA256: %s\n' "$SING_BOX_SOURCE_SHA256"
-    printf 'Patch SHA256: %s\n' "$patch_sha256"
+    printf 'Patch 0001 SHA256: %s\n' "$patch_one_sha256"
+    printf 'Patch 0002 SHA256: %s\n' "$patch_two_sha256"
     printf 'Build tags: %s\n' "$SING_BOX_BUILD_TAGS"
     printf 'Release Go version: %s\n' "$V3NODE_RELEASE_GO_VERSION"
     printf 'Module source: vendor/ (generated from pinned go.mod and go.sum)\n'

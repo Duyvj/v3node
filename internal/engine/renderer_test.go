@@ -48,7 +48,7 @@ func TestSelect(t *testing.T) {
 	}
 	node = NodeSpec{Protocol: "shadowsocks", Transport: "tcp", Cipher: "aes-128-gcm"}
 	renderer, err = Select("auto", node)
-	if err != nil || renderer.Name() != "xray" {
+	if err != nil || renderer.Name() != "sing-box" {
 		t.Fatalf("legacy Shadowsocks renderer=%v err=%v", renderer, err)
 	}
 	node.Cipher = "2022-blake3-aes-128-gcm"
@@ -89,6 +89,12 @@ func TestSelectPreservesXrayOnlyTransportAndRealitySettings(t *testing.T) {
 	if _, err := Select("sing-box", node); err == nil {
 		t.Fatal("forced sing-box accepted multi-SNI Reality")
 	}
+	node = baseNode()
+	node.TLS.ServerNames = []string{"other.example"}
+	renderer, err = Select("auto", node)
+	if err != nil || renderer.Name() != "xray" {
+		t.Fatalf("mismatched singular Reality SNI renderer=%v err=%v", renderer, err)
+	}
 
 	for _, test := range []struct {
 		transport string
@@ -117,12 +123,40 @@ func TestSelectPreservesXrayOnlyTransportAndRealitySettings(t *testing.T) {
 }
 
 func TestSingBoxConvertsWebSocketEarlyDataPath(t *testing.T) {
-	transport, err := singBoxTransport("ws", json.RawMessage(`{"path":"/vpn?ed=2048&token=x"}`))
+	transport, err := singBoxTransport("ws", json.RawMessage(`{"path":"/vpn?ed=2048"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if transport["path"] != "/vpn?token=x" || transport["max_early_data"] != int64(2048) || transport["early_data_header_name"] != "Sec-WebSocket-Protocol" {
+	if transport["path"] != "/vpn" || transport["max_early_data"] != int64(2048) || transport["early_data_header_name"] != "Sec-WebSocket-Protocol" {
 		t.Fatalf("unexpected WebSocket transport: %#v", transport)
+	}
+}
+
+func TestSelectRoutesUnrepresentableTransportQueriesToXray(t *testing.T) {
+	for _, test := range []struct {
+		transport string
+		path      string
+	}{
+		{transport: "ws", path: "/vpn?ed=2048&token=x"},
+		{transport: "ws", path: "/vpn?ed=0"},
+		{transport: "ws", path: "/vpn?ed=invalid"},
+		{transport: "httpupgrade", path: "/vpn?token=x"},
+	} {
+		node := NodeSpec{Protocol: "vless", Port: 443, Transport: test.transport, TransportSettings: json.RawMessage(`{"path":"` + test.path + `"}`)}
+		renderer, err := Select("auto", node)
+		if err != nil || renderer.Name() != "xray" {
+			t.Fatalf("%s path %q renderer=%v err=%v", test.transport, test.path, renderer, err)
+		}
+	}
+}
+
+func TestSingBoxConvertsNumericGRPCTimeouts(t *testing.T) {
+	transport, err := singBoxTransport("grpc", json.RawMessage(`{"serviceName":"vpn","idle_timeout":30,"health_check_timeout":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport["idle_timeout"] != "30s" || transport["ping_timeout"] != "5s" {
+		t.Fatalf("unexpected gRPC transport: %#v", transport)
 	}
 }
 
@@ -202,6 +236,41 @@ func TestSingBoxRenderReality(t *testing.T) {
 	}
 	if got.Users["uid-42"] != 42 {
 		t.Fatalf("missing user map: %#v", got.Users)
+	}
+}
+
+func TestSingBoxRendersBoundedUserRatePolicy(t *testing.T) {
+	node := NodeSpec{Protocol: "shadowsocks", Port: 8388, Transport: "tcp", Cipher: "aes-128-gcm", TLS: TLSSpec{Mode: "none"}}
+	users := []UserSpec{
+		{ID: 7, Credential: "password-one", SpeedLimit: 10},
+		{ID: 8, Credential: "password-two"},
+	}
+	renderer, err := Select("auto", node)
+	if err != nil || renderer.Name() != "sing-box" {
+		t.Fatalf("legacy Shadowsocks renderer=%v err=%v", renderer, err)
+	}
+	got, err := renderer.Render(node, users, baseOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Inbounds []struct {
+			Users []singBoxUserConfig `json:"users"`
+		} `json:"inbounds"`
+		Experimental struct {
+			V3Node struct {
+				UserRates map[string]int64 `json:"user_rates"`
+			} `json:"v3node"`
+		} `json:"experimental"`
+	}
+	if err := json.Unmarshal(got.Config, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Inbounds) != 1 || len(document.Inbounds[0].Users) != 2 {
+		t.Fatalf("legacy Shadowsocks users were not preserved: %#v", document.Inbounds)
+	}
+	if document.Experimental.V3Node.UserRates["uid-7"] != 1_250_000 || len(document.Experimental.V3Node.UserRates) != 1 {
+		t.Fatalf("unexpected user rate map: %#v", document.Experimental.V3Node.UserRates)
 	}
 }
 

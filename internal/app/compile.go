@@ -109,8 +109,8 @@ func CompileState(node model.NodeConfig, users []model.User, local config.Config
 		if err := user.Validate(); err != nil {
 			return CompiledState{}, fmt.Errorf("user %d: %w", user.ID, err)
 		}
-		if user.SpeedLimit > 0 {
-			return CompiledState{}, fmt.Errorf("user %d requests speed_limit, which this release cannot enforce safely", user.ID)
+		if user.SpeedLimit > math.MaxInt64/125_000 {
+			return CompiledState{}, fmt.Errorf("user %d speed_limit is too large", user.ID)
 		}
 		if user.DeviceLimit > local.Runtime.MaxIPsPerUser {
 			return CompiledState{}, fmt.Errorf("user %d device_limit %d exceeds local max_ips_per_user %d", user.ID, user.DeviceLimit, local.Runtime.MaxIPsPerUser)
@@ -155,6 +155,9 @@ func ValidateBackendPolicies(backend string, users []engine.UserSpec) error {
 		return nil
 	}
 	for _, user := range users {
+		if user.SpeedLimit > 0 {
+			return fmt.Errorf("user %d requests speed_limit, which the stock Xray backend cannot enforce", user.ID)
+		}
 		if user.DeviceLimit > 0 {
 			return fmt.Errorf("user %d requests device_limit, which the stock Xray backend cannot enforce", user.ID)
 		}

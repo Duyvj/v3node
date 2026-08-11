@@ -26,6 +26,58 @@ func TestSingBoxVLESSDataTransfer(t *testing.T) {
 	testVLESSDataTransfer(t, "sing-box", binaryPath)
 }
 
+func TestSingBoxEnforcesSharedUserSpeedLimit(t *testing.T) {
+	binaryPath := os.Getenv("V3NODE_TEST_SING_BOX")
+	if binaryPath == "" {
+		t.Skip("V3NODE_TEST_SING_BOX is not set")
+	}
+	ports := freeTCPPorts(t, 4)
+	serverPort, statsPort, clashPort, clientPort := ports[0], ports[1], ports[2], ports[3]
+	node := NodeSpec{
+		Protocol: "vless", Listen: "127.0.0.1", Port: uint16(serverPort),
+		Transport: "tcp", TLS: TLSSpec{Mode: "none"},
+	}
+	opts := Options{
+		LogLevel: "error", StatsListen: net.JoinHostPort("127.0.0.1", fmt.Sprint(statsPort)),
+		ClashListen: net.JoinHostPort("127.0.0.1", fmt.Sprint(clashPort)),
+		ClashSecret: "integration-rate-limit-secret", AddressStrategy: "prefer_ipv4",
+	}
+	// Four megabits/second is 500,000 bytes/second. The shared one-second
+	// bucket covers the first 500 KB; a 1 MiB echo consumes about 2 MiB across
+	// upload and download and should therefore take roughly three seconds.
+	rendered, err := (SingBoxRenderer{}).Render(node, []UserSpec{{
+		ID: 9, Credential: integrationCredential, SpeedLimit: 4,
+	}}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startTestEngine(t, "sing-box", binaryPath, rendered.Config)
+	defer server.stop(t)
+	waitForEnginePort(t, server, net.JoinHostPort("127.0.0.1", fmt.Sprint(serverPort)))
+	client := startTestEngine(t, "sing-box", binaryPath, integrationClientConfig(t, "sing-box", clientPort, serverPort))
+	defer client.stop(t)
+	waitForEnginePort(t, client, net.JoinHostPort("127.0.0.1", fmt.Sprint(clientPort)))
+
+	echoAddress, closeEcho := startEchoServer(t)
+	defer closeEcho()
+	connection := dialSOCKS5(t, net.JoinHostPort("127.0.0.1", fmt.Sprint(clientPort)), echoAddress)
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("r"), 1<<20)
+	started := time.Now()
+	if _, err := connection.Write(payload); err != nil {
+		t.Fatalf("write through rate-limited tunnel: %v", err)
+	}
+	if _, err := io.ReadFull(connection, make([]byte, len(payload))); err != nil {
+		t.Fatalf("read through rate-limited tunnel: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 2*time.Second {
+		t.Fatalf("shared 4 Mbps user limit was not enforced; 2 MiB round trip took %s", elapsed)
+	}
+}
+
 func TestXrayVLESSDataTransfer(t *testing.T) {
 	binaryPath := os.Getenv("V3NODE_TEST_XRAY")
 	if binaryPath == "" {
