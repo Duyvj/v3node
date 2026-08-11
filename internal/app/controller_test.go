@@ -346,7 +346,7 @@ func TestProcessConnectionsEnforcesBeforeThresholdAndAggregatesByDevice(t *testi
 	// The threshold is evaluated over all connections from the same user/IP,
 	// so neither individual connection needs to cross it alone.
 	next := []engine.ActiveConnection{
-		{ID: "accepted-c", User: "uid-1", SourceIP: first, Upload: 60, StartedAt: start},
+		{ID: "accepted-c", User: "uid-1", SourceIP: first, Upload: 50, StartedAt: start},
 		{ID: "accepted-d", User: "uid-1", SourceIP: first, Download: 50, StartedAt: start.Add(time.Second)},
 	}
 	if err := controller.processConnections(context.Background(), next); err != nil {
@@ -355,6 +355,47 @@ func TestProcessConnectionsEnforcesBeforeThresholdAndAggregatesByDevice(t *testi
 	reported := tracker.SnapshotReportableMap()
 	if len(reported[1]) != 1 || reported[1][0] != first.String() {
 		t.Fatalf("aggregated device was not reported: %#v", reported)
+	}
+}
+
+func TestProcessConnectionsAdvancesPanelAliveBaseline(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:               cfg,
+		connections:       connections,
+		online:            tracker,
+		alive:             model.AliveUsers{1: 2},
+		aliveReady:        true,
+		connectionsSeeded: true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 3}},
+		},
+		haveActive: true,
+	}
+	start := time.Unix(1_700_000_000, 0)
+	accepted := netip.MustParseAddr("192.0.2.40")
+	rejected := netip.MustParseAddr("192.0.2.41")
+	snapshot := []engine.ActiveConnection{
+		{ID: "accepted", User: "uid-1", SourceIP: accepted, StartedAt: start},
+		{ID: "rejected", User: "uid-1", SourceIP: rejected, StartedAt: start.Add(time.Second)},
+	}
+	if err := controller.processConnections(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.Has(1, accepted.String()) || tracker.Has(1, rejected.String()) {
+		t.Fatalf("panel baseline was not enforced: %#v", tracker.SnapshotMap())
+	}
+	closed := connections.closedIDs()
+	if len(closed) != 1 || closed[0] != "rejected" {
+		t.Fatalf("closed connections = %#v", closed)
 	}
 }
 

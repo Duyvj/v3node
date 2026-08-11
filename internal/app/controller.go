@@ -566,7 +566,11 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 					localCounts[userID] = count
 					return nil
 				}
-				count++
+				// The panel's alive count is the baseline for devices which may
+				// be active on another node. Advance that effective count, rather
+				// than only the smaller local count, so several new IPs in one
+				// snapshot cannot each consume the same remaining panel slot.
+				count = current + 1
 			}
 			localCounts[userID] = count
 			if err := c.online.Reserve(userID, address); err != nil {
@@ -575,7 +579,7 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 		}
 		// Traffic is aggregated per user/IP. Splitting activity over many tiny
 		// connections can no longer evade the panel's reporting threshold.
-		if device.traffic > c.active.DeviceOnlineMinBytes {
+		if device.traffic >= c.active.DeviceOnlineMinBytes {
 			if err := c.online.Observe(userID, address); err != nil {
 				return err
 			}

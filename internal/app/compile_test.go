@@ -82,24 +82,31 @@ func TestCompileRealityFallsBackToPluralServerNames(t *testing.T) {
 	}
 }
 
-func TestCompilePreservesSpeedLimit(t *testing.T) {
+func TestCompilePreservesUserLimits(t *testing.T) {
 	node := model.NodeConfig{Protocol: model.ProtocolVLESS, ServerPort: 443, Network: "tcp"}
-	compiled, err := CompileState(node, []model.User{{ID: 1, UUID: "48e90e76-2a72-46be-ac91-45d96486977a", SpeedLimit: 10}}, config.Defaults())
+	compiled, err := CompileState(node, []model.User{{
+		ID: 1, UUID: "48e90e76-2a72-46be-ac91-45d96486977a", SpeedLimit: 10, DeviceLimit: 2,
+	}}, config.Defaults())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compiled.Users) != 1 || compiled.Users[0].SpeedLimit != 10 {
-		t.Fatalf("speed limit was not preserved: %#v", compiled.Users)
+	if len(compiled.Users) != 1 || compiled.Users[0].SpeedLimit != 10 || compiled.Users[0].DeviceLimit != 2 {
+		t.Fatalf("user limits were not preserved: %#v", compiled.Users)
 	}
 }
 
 func TestValidateBackendPoliciesRejectsXrayLimits(t *testing.T) {
-	users := []engine.UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a", SpeedLimit: 10, DeviceLimit: 2}}
+	users := []engine.UserSpec{{ID: 1, Credential: "48e90e76-2a72-46be-ac91-45d96486977a", DeviceLimit: 2}}
 	if err := ValidateBackendPolicies("sing-box", users); err != nil {
 		t.Fatalf("sing-box device policy was rejected: %v", err)
 	}
 	if err := ValidateBackendPolicies("xray", users); err == nil {
 		t.Fatal("unenforceable Xray device limit was accepted")
+	}
+	users[0].DeviceLimit = 0
+	users[0].SpeedLimit = 10
+	if err := ValidateBackendPolicies("xray", users); err == nil {
+		t.Fatal("unenforceable Xray speed limit was accepted")
 	}
 }
 

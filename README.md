@@ -98,7 +98,9 @@ cgroup và dùng `sysinfo(2)` khi profile systemd che `/proc/meminfo`. Đây là
 tiêu GC của controller, không phải trần RAM của toàn bộ dịch vụ.
 
 Các giới hạn mặc định gồm response config 2 MiB, response users 32 MiB, panel
-payload 32 MiB, Stats RPC 64 MiB, 100.000 users, 200.000 online IP và 32 IP/user.
+payload 32 MiB, Stats RPC 64 MiB, 100.000 users, 200.000 online IP và 1.024 IP/user.
+`runtime.max_ips_per_user` chỉ là trần an toàn bộ nhớ; giới hạn thực tế của
+từng khách luôn lấy từ `device_limit` trên panel (`0` nghĩa là không giới hạn).
 Traffic chờ report được giới hạn theo `max_users`. Có thể
 chỉnh trong `runtime`, nhưng tăng giới hạn cũng làm tăng RAM xấu nhất. RAM của engine còn phụ
 thuộc số kết nối đồng thời, protocol, QUIC, TLS và lưu lượng thực tế; dự án không

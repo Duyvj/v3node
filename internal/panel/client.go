@@ -39,7 +39,7 @@ const (
 	defaultTimeout          = 15 * time.Second
 	defaultMaxResponseBytes = int64(4 << 20)
 	defaultMaxUsers         = 100_000
-	defaultMaxIPsPerUser    = 64
+	defaultMaxIPsPerUser    = 1024
 	hardMaxResponseBytes    = int64(64 << 20)
 	hardMaxUsers            = 1_000_000
 	maxETagBytes            = 4096

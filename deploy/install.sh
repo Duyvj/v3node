@@ -572,7 +572,7 @@ write_example_config() {
     "max_user_response_bytes": 33554432,
     "max_users": 100000,
     "max_online_ips": 200000,
-    "max_ips_per_user": 32,
+    "max_ips_per_user": 1024,
     "online_ip_ttl": "3m",
     "max_panel_payload_bytes": 33554432,
     "max_stats_response_bytes": 67108864

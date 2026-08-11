@@ -33,6 +33,11 @@ reported as `{userID: [uploadBytes, downloadBytes]}` and online clients as
 `{userID: [ip, ...]}`. Response-size and item-count bounds apply before data is
 accepted.
 
+The per-user device policy always comes from the panel's `device_limit` field;
+`runtime.max_ips_per_user` is only a local memory-safety ceiling and never
+replaces the panel value. The default ceiling is 1,024 IPs per user, allocated
+lazily under the separate global online-IP bound.
+
 ## Protocol and engine matrix
 
 | Protocol | sing-box 1.13.12 project build | Stock Xray 26.3.27 |

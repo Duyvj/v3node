@@ -203,6 +203,36 @@ func TestGetUsersJSONAndMessagePack(t *testing.T) {
 	}
 }
 
+func TestGetUsersDetectsDeviceLimitChange(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != UsersEndpoint {
+			http.NotFound(writer, request)
+			return
+		}
+		limit := 1
+		if requests.Add(1) > 1 {
+			limit = 2
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Header().Set("ETag", fmt.Sprintf(`"users-%d"`, limit))
+		fmt.Fprintf(writer, `{"users":[{"id":1,"uuid":"credential","device_limit":%d}]}`, limit)
+	}))
+	defer server.Close()
+	client := mustTestClient(t, server.URL, "token", 1, nil)
+	defer client.Close()
+
+	users, changed, err := client.GetUsers(context.Background())
+	if err != nil || !changed || len(users) != 1 || users[0].DeviceLimit != 1 {
+		t.Fatalf("initial users = %#v, changed %v, error %v", users, changed, err)
+	}
+	users, changed, err = client.GetUsers(context.Background())
+	if err != nil || !changed || len(users) != 1 || users[0].DeviceLimit != 2 {
+		t.Fatalf("updated users = %#v, changed %v, error %v", users, changed, err)
+	}
+}
+
 func TestGetUsersBoundsAndValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

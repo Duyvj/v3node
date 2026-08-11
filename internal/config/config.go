@@ -141,7 +141,7 @@ func Defaults() Config {
 			MaxUserResponseBytes:  32 << 20,
 			MaxUsers:              100_000,
 			MaxOnlineIPs:          200_000,
-			MaxIPsPerUser:         32,
+			MaxIPsPerUser:         1024,
 			OnlineIPTTL:           Duration{3 * time.Minute},
 			MaxPanelPayloadBytes:  32 << 20,
 			MaxStatsResponseBytes: 64 << 20,
