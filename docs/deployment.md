@@ -46,9 +46,8 @@ and managed directories, installs the controller plus both pinned engines, and
 starts only the engine selected by the panel node configuration. The development
 source tree cannot install from the network because its project asset hashes are
 deliberately locked. The separate `script/install.sh` branch bootstrap pins a
-reviewed release and verifies that release's installer against `SHA256SUMS`
-before execution; otherwise use a tagged release or the fully local,
-hash-verified command above.
+reviewed release and its exact installer SHA-256 before execution; otherwise
+use a tagged release or the fully local, hash-verified command above.
 
 For a published release, download `install.sh` from one exact release tag,
 verify it against the checksum published with that release, and run the local

@@ -185,6 +185,11 @@ bootstrap_version=$(read_setting "$bootstrap" 'readonly ' V3NODE_BOOTSTRAP_VERSI
     printf 'branch bootstrap does not pin a beta release\n' >&2
     exit 1
 }
+bootstrap_installer_sha256=$(read_setting "$bootstrap" 'readonly ' V3NODE_INSTALL_SHA256)
+[[ $bootstrap_installer_sha256 =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'branch bootstrap does not pin a valid installer SHA256\n' >&2
+    exit 1
+}
 grep -Fqx \
     "readonly RELEASE_BASE=\"https://github.com/Duyvj/v3node/releases/download/v\${V3NODE_BOOTSTRAP_VERSION}\"" \
     "$bootstrap" || {

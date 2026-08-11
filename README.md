@@ -155,9 +155,9 @@ Host mục tiêu hiện là Debian 12 hoặc Ubuntu 22.04 trở lên, systemd, k
 
 Installer đầy đủ trong `deploy/` trên nhánh phát triển cố ý giữ checksum
 placeholder; quy trình đóng gói chỉ thay chúng trong artifact của release.
-Riêng bootstrap nhỏ tại `script/install.sh` ghim một release cụ thể, tải cả
-installer lẫn `SHA256SUMS`, kiểm tra hash rồi mới thực thi. Vì vậy có thể dùng
-đúng cú pháp quen thuộc của v2node gốc và chỉ thay link:
+Riêng bootstrap nhỏ tại `script/install.sh` ghim một release cụ thể cùng
+SHA-256 chính xác của installer, kiểm tra hash rồi mới thực thi. Vì vậy có thể
+dùng đúng cú pháp quen thuộc của v2node gốc và chỉ thay link:
 
 ```bash
 wget -N https://raw.githubusercontent.com/Duyvj/v3node/main/script/install.sh && \

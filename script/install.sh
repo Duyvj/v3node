@@ -8,6 +8,7 @@ umask 077
 # installer carries the architecture-specific artifact hashes and rollback
 # logic; never execute an unverified second-stage script.
 readonly V3NODE_BOOTSTRAP_VERSION=0.3.0-beta.2
+readonly V3NODE_INSTALL_SHA256=32f19abd447eacec155d0a5e278b0dafb9b7ea2fbfb687c540d0f4bf520274f5
 readonly RELEASE_BASE="https://github.com/Duyvj/v3node/releases/download/v${V3NODE_BOOTSTRAP_VERSION}"
 
 work_directory=
@@ -65,37 +66,21 @@ fetch() {
 }
 
 main() {
-    local expected actual install_bytes checksum_bytes
+    local actual install_bytes
     command -v bash >/dev/null 2>&1 || die 'bash is required'
     command -v sha256sum >/dev/null 2>&1 || die 'sha256sum is required'
     command -v awk >/dev/null 2>&1 || die 'awk is required'
     command -v stat >/dev/null 2>&1 || die 'stat is required'
+    [[ $V3NODE_INSTALL_SHA256 =~ ^[0-9a-f]{64}$ ]] || die 'embedded installer checksum is invalid'
 
     work_directory=$(mktemp -d /tmp/v3node-bootstrap.XXXXXX)
     chmod 0700 "$work_directory"
     fetch "${RELEASE_BASE}/install.sh" "$work_directory/install.sh"
-    fetch "${RELEASE_BASE}/SHA256SUMS" "$work_directory/SHA256SUMS"
 
     install_bytes=$(stat --format='%s' -- "$work_directory/install.sh")
-    checksum_bytes=$(stat --format='%s' -- "$work_directory/SHA256SUMS")
     (( install_bytes > 0 && install_bytes <= 2097152 )) || die 'release installer has an invalid size'
-    (( checksum_bytes > 0 && checksum_bytes <= 1048576 )) || die 'release checksum file has an invalid size'
-
-    expected=$(awk '
-        $2 == "install.sh" {
-            count++
-            digest = $1
-        }
-        END {
-            if (count != 1) {
-                exit 1
-            }
-            print digest
-        }
-    ' "$work_directory/SHA256SUMS") || die 'release checksum file has no unique install.sh entry'
-    [[ $expected =~ ^[0-9a-f]{64}$ ]] || die 'release installer checksum is invalid'
     actual=$(sha256sum "$work_directory/install.sh" | awk '{print $1}')
-    [[ $actual == "$expected" ]] || die 'release installer checksum mismatch'
+    [[ $actual == "$V3NODE_INSTALL_SHA256" ]] || die 'release installer checksum mismatch'
 
     chmod 0700 "$work_directory/install.sh"
     log "verified v${V3NODE_BOOTSTRAP_VERSION}; starting release installer"

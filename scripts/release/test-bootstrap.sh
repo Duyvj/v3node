@@ -16,9 +16,9 @@ here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 readonly here
 project_root=$(unset CDPATH; cd -- "${here}/../.." && pwd)
 readonly project_root
-readonly bootstrap=${project_root}/script/install.sh
+readonly source_bootstrap=${project_root}/script/install.sh
 
-for required_command in awk bash cmp cp grep mktemp sha256sum; do
+for required_command in awk bash chmod cmp cp grep mktemp sed sha256sum; do
     command -v "$required_command" >/dev/null 2>&1 || {
         printf 'required command is unavailable: %s\n' "$required_command" >&2
         exit 1
@@ -32,14 +32,24 @@ cleanup() {
 trap cleanup EXIT
 
 readonly fixture_installer=${project_root}/scripts/release/test-bootstrap.sh
-readonly fixture_checksums=${temporary_directory}/SHA256SUMS
 fixture_digest=$(sha256sum "$fixture_installer" | awk '{print $1}')
 readonly fixture_digest
-# Match GNU sha256sum's default text-mode format used by assemble-release.sh.
-printf '%s  install.sh\n' "$fixture_digest" >"$fixture_checksums"
+readonly bootstrap=${temporary_directory}/install.sh
+cp -- "$source_bootstrap" "$bootstrap"
+chmod 0700 "$bootstrap"
+[[ $(grep -Ec '^readonly V3NODE_INSTALL_SHA256=.*$' "$bootstrap") -eq 1 ]] || {
+    printf 'bootstrap does not contain exactly one installer checksum setting\n' >&2
+    exit 1
+}
+sed -i -E \
+    "s/^readonly V3NODE_INSTALL_SHA256=.*$/readonly V3NODE_INSTALL_SHA256=${fixture_digest}/" \
+    "$bootstrap"
+grep -Fqx "readonly V3NODE_INSTALL_SHA256=${fixture_digest}" "$bootstrap" || {
+    printf 'could not render bootstrap fixture checksum\n' >&2
+    exit 1
+}
 
 export V3NODE_BOOTSTRAP_FIXTURE_INSTALLER=$fixture_installer
-export V3NODE_BOOTSTRAP_FIXTURE_CHECKSUMS=$fixture_checksums
 export V3NODE_BOOTSTRAP_FIXTURE_MODE=1
 unset V3NODE_BOOTSTRAP_CORRUPT_INSTALLER
 
@@ -70,7 +80,6 @@ curl() {
     [[ -n $destination && -n $url ]] || return 64
     case $url in
         */install.sh) source=$V3NODE_BOOTSTRAP_FIXTURE_INSTALLER ;;
-        */SHA256SUMS) source=$V3NODE_BOOTSTRAP_FIXTURE_CHECKSUMS ;;
         *) return 65 ;;
     esac
 
@@ -122,9 +131,7 @@ bootstrap_version=$(awk -F= '
 ' "$bootstrap")
 readonly bootstrap_version
 readonly release_base="https://github.com/Duyvj/v3node/releases/download/v${bootstrap_version}"
-printf '%s\0%s\0' \
-    "${release_base}/install.sh" \
-    "${release_base}/SHA256SUMS" >"$expected_urls"
+printf '%s\0' "${release_base}/install.sh" >"$expected_urls"
 
 bash "$bootstrap" "${original_arguments[@]}" >/dev/null
 cmp --silent -- "$expected_arguments" "$actual_arguments" || {
