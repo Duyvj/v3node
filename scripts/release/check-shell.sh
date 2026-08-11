@@ -19,6 +19,7 @@ readonly -a scripts=(
     "${project_root}/deploy/v3node-tune"
     "${project_root}"/deploy/*.sh
     "${project_root}"/engine-patches/sing-box/*.sh
+    "${project_root}"/script/*.sh
     "${project_root}"/scripts/release/*.sh
 )
 
@@ -169,3 +170,26 @@ for patch_file in "${patch_files[@]}"; do
         exit 1
     }
 done
+
+# Preserve the original v2node one-line installation argument contract. Help
+# exits before host mutation, so this is safe to exercise in CI.
+bash "$installer" \
+    --api-host https://panel.example.com \
+    --node-id 73 \
+    --api-key test-only-key \
+    --help >/dev/null
+
+readonly bootstrap=${project_root}/script/install.sh
+bootstrap_version=$(read_setting "$bootstrap" 'readonly ' V3NODE_BOOTSTRAP_VERSION)
+[[ $bootstrap_version =~ ^[0-9]+[.][0-9]+[.][0-9]+-beta[.][0-9]+$ ]] || {
+    printf 'branch bootstrap does not pin a beta release\n' >&2
+    exit 1
+}
+grep -Fqx \
+    "readonly RELEASE_BASE=\"https://github.com/Duyvj/v3node/releases/download/v\${V3NODE_BOOTSTRAP_VERSION}\"" \
+    "$bootstrap" || {
+    printf 'branch bootstrap has an unexpected release base\n' >&2
+    exit 1
+}
+
+bash "${project_root}/scripts/release/test-bootstrap.sh"

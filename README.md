@@ -153,11 +153,25 @@ Host mục tiêu hiện là Debian 12 hoặc Ubuntu 22.04 trở lên, systemd, k
 | `/etc/v3node/panel.token` | API token đề xuất |
 | `/var/lib/v3node/` | state, checkpoint, last-known-good |
 
-Installer trên nhánh phát triển cố ý giữ checksum placeholder; quy trình đóng
-gói chỉ thay chúng trong artifact của release. Không chạy
-`curl .../main/install.sh | bash` và không tự thay placeholder. Chỉ dùng
-`install.sh` gắn với một tag cụ thể trong GitHub Releases, kiểm tra checksum
-theo release notes rồi mới chạy:
+Installer đầy đủ trong `deploy/` trên nhánh phát triển cố ý giữ checksum
+placeholder; quy trình đóng gói chỉ thay chúng trong artifact của release.
+Riêng bootstrap nhỏ tại `script/install.sh` ghim một release cụ thể, tải cả
+installer lẫn `SHA256SUMS`, kiểm tra hash rồi mới thực thi. Vì vậy có thể dùng
+đúng cú pháp quen thuộc của v2node gốc và chỉ thay link:
+
+```bash
+wget -N https://raw.githubusercontent.com/Duyvj/v3node/main/script/install.sh && \
+bash install.sh --api-host 'https://panel.example.com' --node-id 73 --api-key 'your-api-key'
+```
+
+`--api-host` là alias của `--panel-url`; `--api-key` được lưu thành
+`/etc/v3node/panel.token` với quyền hạn chế, không ghi vào `config.json` hay log.
+Tuy nhiên key vẫn xuất hiện tạm thời trong history/argv do chính cú pháp tương
+thích này. Với production, nên dùng `--token-file` như ví dụ bên dưới.
+
+Không pipe raw script thẳng vào shell và không tự thay placeholder. Có thể tải
+trực tiếp `install.sh` gắn với một tag cụ thể trong GitHub Releases, kiểm tra
+checksum theo release notes rồi mới chạy:
 
 ```bash
 curl -fLO --proto '=https' --tlsv1.2 \

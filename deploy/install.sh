@@ -44,6 +44,7 @@ config_source=
 token_source=
 panel_url=
 panel_node_id=
+api_key=
 local_v3node_file=
 local_v3node_sha256=
 local_sing_box_file=
@@ -75,8 +76,13 @@ Usage: install.sh [options]
   --token-file FILE         Install FILE as /etc/v3node/panel.token with
                             root:v3node ownership and mode 0640.
   --panel-url URL           Generate config.json for this panel URL.
+  --api-host URL            Compatibility alias for --panel-url.
   --node-id ID              Positive node ID used with --panel-url.
-                            Requires --token-file and conflicts with --config.
+                            Requires --api-key or --token-file and conflicts
+                            with --config.
+  --api-key KEY             Compatibility alternative to --token-file.
+                            WARNING: KEY remains in shell history/process argv;
+                            --token-file is recommended for production.
   --v3node-file FILE        Use a local controller binary instead of the
                             versioned release asset.
   --v3node-sha256 SHA256    Required SHA256 for --v3node-file.
@@ -118,14 +124,19 @@ while [[ $# -gt 0 ]]; do
             token_source=$2
             shift 2
             ;;
-        --panel-url)
-            [[ $# -ge 2 ]] || die '--panel-url requires a URL'
+        --panel-url|--api-host)
+            [[ $# -ge 2 ]] || die "$1 requires a URL"
             panel_url=$2
             shift 2
             ;;
         --node-id)
             [[ $# -ge 2 ]] || die '--node-id requires an integer'
             panel_node_id=$2
+            shift 2
+            ;;
+        --api-key)
+            [[ $# -ge 2 ]] || die '--api-key requires a value'
+            api_key=$2
             shift 2
             ;;
         --v3node-file)
@@ -322,7 +333,14 @@ stage_inputs() {
         (( bytes <= 1048576 )) || die 'local configuration exceeds 1 MiB'
     fi
 
-    if [[ -n ${token_source} ]]; then
+    if [[ -n ${api_key} ]]; then
+        printf '%s' "$api_key" >"$stage_dir/panel.token"
+        chmod 0600 "$stage_dir/panel.token"
+        api_key=
+        token_source=$stage_dir/panel.token
+        bytes=$(stat --format='%s' -- "$stage_dir/panel.token")
+        (( bytes > 0 && bytes <= 16384 )) || die '--api-key must contain between 1 byte and 16 KiB'
+    elif [[ -n ${token_source} ]]; then
         snapshot_regular_input "$token_source" "$stage_dir/panel.token" '--token-file' 0600
         bytes=$(stat --format='%s' -- "$stage_dir/panel.token")
         (( bytes > 0 && bytes <= 16384 )) || die 'panel token file must contain between 1 byte and 16 KiB'
@@ -1197,11 +1215,12 @@ main() {
     if [[ -n ${token_source} ]]; then
         [[ -f ${token_source} && ! -L ${token_source} ]] || die '--token-file must reference a regular file'
     fi
-    if [[ -n ${panel_url} || -n ${panel_node_id} ]]; then
-        [[ -n ${panel_url} && -n ${panel_node_id} ]] || die '--panel-url and --node-id must be used together'
+    [[ -z ${api_key} || -z ${token_source} ]] || die '--api-key conflicts with --token-file'
+    if [[ -n ${panel_url} || -n ${panel_node_id} || -n ${api_key} ]]; then
+        [[ -n ${panel_url} && -n ${panel_node_id} ]] || die '--api-host/--panel-url and --node-id must be used together'
         [[ ${panel_node_id} =~ ^[1-9][0-9]*$ ]] || die '--node-id must be a positive integer'
-        [[ -z ${config_source} ]] || die '--panel-url conflicts with --config'
-        [[ -n ${token_source} ]] || die '--panel-url requires --token-file'
+        [[ -z ${config_source} ]] || die '--api-host/--panel-url conflicts with --config'
+        [[ -n ${token_source} || -n ${api_key} ]] || die '--api-host/--panel-url requires --api-key or --token-file'
     fi
     for managed_directory in "$CONFIG_DIR" "$STATE_DIR" "$RUN_DIR" "$META_DIR" "$LIB_DIR" "$DOC_DIR" "$BACKUP_ROOT"; do
         validate_managed_directory "$managed_directory"

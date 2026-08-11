@@ -45,8 +45,10 @@ or Xray preinstalled. The installer creates the unprivileged service account
 and managed directories, installs the controller plus both pinned engines, and
 starts only the engine selected by the panel node configuration. The development
 source tree cannot install from the network because its project asset hashes are
-deliberately locked; use a tagged release or the fully local, hash-verified
-command above.
+deliberately locked. The separate `script/install.sh` branch bootstrap pins a
+reviewed release and verifies that release's installer against `SHA256SUMS`
+before execution; otherwise use a tagged release or the fully local,
+hash-verified command above.
 
 For a published release, download `install.sh` from one exact release tag,
 verify it against the checksum published with that release, and run the local
@@ -54,6 +56,21 @@ file as root. Do not pipe a raw branch or `latest` URL into a shell. Supplying
 `--config` and `--token-file` in the first invocation allows the installer to
 validate the real panel response and selected engine before enabling the
 service.
+
+For command-line compatibility with the original v2node installer, the branch
+bootstrap and release installer accept the following aliases:
+
+```bash
+wget -N https://raw.githubusercontent.com/Duyvj/v3node/main/script/install.sh
+bash install.sh \
+  --api-host 'https://panel.example.com' \
+  --node-id 73 \
+  --api-key 'your-api-key'
+```
+
+This compatibility form exposes the key to shell history and process argv.
+The installer never logs it and stores it only in `/etc/v3node/panel.token`,
+but `--token-file` remains the recommended production workflow.
 
 ## Configure the node
 
