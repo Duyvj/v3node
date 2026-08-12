@@ -23,10 +23,23 @@ type OnlineUser struct {
 	IPs    []string `json:"ips"`
 }
 
+// SnapshotGeneration identifies records first admitted during one complete
+// Connections reconciliation. It is opaque outside this package.
+type SnapshotGeneration uint64
+
+// SnapshotState captures the small enforcement metadata needed to reconcile a
+// complete Connections snapshot in one lock acquisition.
+type SnapshotState struct {
+	Generation SnapshotGeneration
+	LiveByUser map[int]int
+}
+
 type onlineRecord struct {
 	userID     int
 	address    netip.Addr
 	expiresAt  time.Time
+	active     bool
+	acceptedIn SnapshotGeneration
 	reportable bool
 	globalElem *list.Element
 	userElem   *list.Element
@@ -51,6 +64,7 @@ type OnlineTracker struct {
 	users         map[int]*onlineUserState
 	globalLRU     list.List
 	watermark     time.Time
+	generation    SnapshotGeneration
 }
 
 // NewOnlineTracker constructs a bounded online-IP tracker.
@@ -109,6 +123,67 @@ func (t *OnlineTracker) Reserve(userID int, rawAddress string) error {
 	return t.observeAddrAt(userID, address, time.Now(), false)
 }
 
+// ReconcileSnapshot marks already-retained pairs directly in the caller's
+// complete snapshot map. It removes policy pairs absent from that snapshot and
+// returns the retained local count for each policy user. Unlimited users keep
+// their normal reporting TTL. Reusing the caller's map avoids allocating a
+// second nested map on every connection poll.
+func (t *OnlineTracker) ReconcileSnapshot(active map[int]map[netip.Addr]bool, policyUsers map[int]struct{}) SnapshotState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.effectiveNow(time.Now())
+	t.purgeExpiredLocked(now)
+	t.generation++
+	if t.generation == 0 {
+		t.generation++
+	}
+	state := SnapshotState{
+		Generation: t.generation,
+		LiveByUser: make(map[int]int, min(len(policyUsers), len(t.users))),
+	}
+	for element := t.globalLRU.Front(); element != nil; element = element.Next() {
+		record := element.Value.(*onlineRecord)
+		_, policyUser := policyUsers[record.userID]
+		if policyUser {
+			record.active = false
+		}
+	}
+	for userID, addresses := range active {
+		user := t.users[userID]
+		if user == nil {
+			continue
+		}
+		for address := range addresses {
+			record := user.records[address.Unmap()]
+			if record == nil {
+				continue
+			}
+			addresses[address.Unmap()] = true
+			record.active = true
+			record.expiresAt = now.Add(t.ttl)
+			t.globalLRU.MoveToBack(record.globalElem)
+			user.lru.MoveToBack(record.userElem)
+		}
+	}
+	for element := t.globalLRU.Front(); element != nil; {
+		next := element.Next()
+		record := element.Value.(*onlineRecord)
+		if _, policyUser := policyUsers[record.userID]; policyUser && !record.active {
+			t.removeRecordLocked(element.Value.(*onlineRecord))
+		}
+		element = next
+	}
+	for userID := range policyUsers {
+		user := t.users[userID]
+		if user == nil {
+			continue
+		}
+		state.LiveByUser[userID] = len(user.records)
+	}
+	return state
+}
+
 func (t *OnlineTracker) observeAddrAt(userID int, address netip.Addr, now time.Time, reportable bool) error {
 	if userID <= 0 {
 		return ErrInvalidUserID
@@ -126,6 +201,7 @@ func (t *OnlineTracker) observeAddrAt(userID int, address netip.Addr, now time.T
 	if user := t.users[userID]; user != nil {
 		if record := user.records[address]; record != nil {
 			record.expiresAt = now.Add(t.ttl)
+			record.active = true
 			record.reportable = record.reportable || reportable
 			t.globalLRU.MoveToBack(record.globalElem)
 			user.lru.MoveToBack(record.userElem)
@@ -139,7 +215,16 @@ func (t *OnlineTracker) observeAddrAt(userID int, address netip.Addr, now time.T
 		t.removeRecordLocked(user.lru.Front().Value.(*onlineRecord))
 	}
 	for t.globalLRU.Len() >= t.maxEntries {
-		t.removeRecordLocked(t.globalLRU.Front().Value.(*onlineRecord))
+		candidate := t.globalLRU.Front()
+		if !reportable {
+			for element := t.globalLRU.Front(); element != nil; element = element.Next() {
+				if element.Value.(*onlineRecord).reportable {
+					candidate = element
+					break
+				}
+			}
+		}
+		t.removeRecordLocked(candidate.Value.(*onlineRecord))
 	}
 
 	user := t.users[userID]
@@ -151,12 +236,38 @@ func (t *OnlineTracker) observeAddrAt(userID int, address netip.Addr, now time.T
 		userID:     userID,
 		address:    address,
 		expiresAt:  now.Add(t.ttl),
+		active:     true,
+		acceptedIn: t.generation,
 		reportable: reportable,
 	}
 	record.globalElem = t.globalLRU.PushBack(record)
 	record.userElem = user.lru.PushBack(record)
 	user.records[address] = record
 	return nil
+}
+
+// ForgetIfAcceptedIn removes a pair only when it was first admitted in the
+// supplied snapshot generation. It lets the controller roll back a newly
+// reserved device if closing rejected connections fails, without deleting an
+// older accepted device that reconnected from the same IP.
+func (t *OnlineTracker) ForgetIfAcceptedIn(userID int, rawAddress string, generation SnapshotGeneration) bool {
+	address, err := netip.ParseAddr(rawAddress)
+	if err != nil || address.Zone() != "" {
+		return false
+	}
+	address = address.Unmap()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	user := t.users[userID]
+	if user == nil {
+		return false
+	}
+	record := user.records[address]
+	if record == nil || record.acceptedIn != generation {
+		return false
+	}
+	t.removeRecordLocked(record)
+	return true
 }
 
 // Snapshot returns a deterministic copy at the current time.

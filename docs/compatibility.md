@@ -129,8 +129,16 @@ On sing-box, a `device_limit` is an IP-based policy. About every five seconds,
 the controller closes a connection from a newly observed source IP when that
 IP would exceed the limit. `device_online_min_traffic` controls when an accepted
 IP becomes reportable to the panel, not whether it occupies a local policy
-slot. Enforcement is consequently eventual, not an admission-time guarantee,
-and multiple devices behind one NAT appear as one IP. Stock Xray has no
+slot. Each complete Connections snapshot also removes locally disconnected
+IPs, so they normally release a slot on the next poll instead of waiting for
+`online_ip_ttl`. The panel `alive` aggregate is used as a cross-node baseline
+after subtracting the number of IPs in this node's last successfully posted
+online set. A failed POST does not change that overlap; alive counts expire
+locally after five minutes without a successful refresh. If a close fails,
+newly reserved replacement slots from that snapshot are rolled back and
+retried from the next live snapshot. Enforcement is consequently eventual, not an
+admission-time guarantee, and multiple devices behind one NAT appear as one
+IP. Stock Xray has no
 equivalent source-IP/user hook, so an Xray generation
 containing a non-zero `device_limit` also fails validation. These are explicit
 compatibility boundaries, not claims that unsupported limits were applied.

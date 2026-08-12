@@ -54,9 +54,16 @@ device limit. It takes effect after the next Connections poll, so it is not an
 admission-time or instantaneous guarantee. The panel's
 `device_online_min_traffic` threshold affects reporting only; even a
 low-traffic accepted IP occupies a bounded local policy slot. Existing sessions
-from an already accepted IP do not consume another slot. When panel-side alive
-counts are available, the controller conservatively uses the greater of that
-count and its local live-IP count before accepting a new IP.
+from an already accepted IP do not consume another slot. Every complete local
+Connections snapshot removes disconnected IPs and refreshes active ones. When
+panel-side alive counts are available, the controller subtracts the number of
+IPs in this node's last successfully posted online set and combines the
+remaining cross-node baseline with the authoritative local snapshot before
+accepting a new IP. A failed close rolls back slots newly reserved during that
+snapshot so the next poll retries against the live connection set. Failed
+online payloads never advance the overlap state, and an alive-list value is
+discarded after five minutes without a successful refresh rather than
+retaining a stale cross-node lock forever.
 
 The Connections response is decoded as a JSON stream with both item-count and
 body-size limits. The resulting bounded snapshot still occupies memory in

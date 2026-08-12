@@ -137,6 +137,14 @@ user struct thay vì một map động cho mỗi tài khoản để giảm heap 
 Limiter tốc độ chỉ tạo một token bucket cho user có giới hạn, dùng chung cho mọi
 phiên và cả hai chiều; kết nối mới không làm bảng limiter tăng vô hạn.
 
+Giới hạn thiết bị lấy trực tiếp từ `users[].device_limit` của panel và tính theo
+IP nguồn. Mỗi snapshot Connections đầy đủ giải phóng IP đã ngắt ở vòng poll kế
+tiếp (khoảng 5 giây), không giữ oan slot đến hết TTL. Số `alive` của panel vẫn
+được dùng để tính thiết bị trên node khác, nhưng số IP trong lần report thành
+công gần nhất của chính node được trừ ra để tránh đếm hai lần. Payload report
+lỗi không được trừ; `alive` cũ cũng bị bỏ sau 5 phút lỗi liên tục để không khóa
+oan khách hàng vô thời hạn.
+
 Unit systemd không đặt hard RAM limit để tránh OOM-kill phiên hợp lệ khi tải tăng.
 Nó chạy bằng user `v3node`, chỉ có `CAP_NET_BIND_SERVICE`, bật accounting và giới
 hạn vùng ghi. Profile BBR/socket là tùy chọn, xem `v3node tune --apply` sau khi đã

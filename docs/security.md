@@ -184,3 +184,21 @@ spoofing are client-side features. Adding those fields to an inbound would not
 make clients use them. sing-box also cautions that uTLS imitation can itself be
 fingerprinted. v3node deliberately leaves client fingerprint policy to the
 panel subscription and compatible client application.
+
+Current deployment guidance keeps VLESS + REALITY + XTLS Vision over RAW/TCP
+on external port 443 as the conservative default. XHTTP over TLS/REALITY,
+AnyTLS, ShadowTLS, ECH, Hysteria2/TUIC obfuscation, FinalMask and MASQUE-style
+profiles all require matching panel subscription fields and client support;
+the server cannot enable them transparently for existing clients. QUIC-native
+profiles are useful alternatives on lossy paths, but are not universal
+anti-blocking defaults: nationwide measurements have shown that the GFW can
+decrypt QUIC Initial packets and filter by SNI. Experimental sing-box 1.14
+client-side TLS spoofing and fragmentation features remain outside the pinned stable engine until a
+stable release, panel contract, client rollout and resource soak tests exist.
+
+Primary references for this policy are the upstream
+[Xray transport matrix](https://xtls.github.io/en/config/transport.html),
+[REALITY guidance](https://xtls.github.io/en/config/transports/reality.html),
+[sing-box release channel](https://github.com/SagerNet/sing-box/releases),
+[TLS ECH standard RFC 9849](https://datatracker.ietf.org/doc/rfc9849/), and the
+[USENIX Security 2025 GFW QUIC measurement](https://gfw.report/publications/usenixsecurity25/en/).

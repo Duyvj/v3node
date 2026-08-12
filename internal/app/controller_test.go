@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -21,12 +22,15 @@ import (
 )
 
 type accountingPanel struct {
-	reports [][]model.UserTraffic
+	reports   [][]model.UserTraffic
+	online    []model.OnlineUsers
+	onlineErr error
 }
 
 type fakeConnectionsAPI struct {
-	mu     sync.Mutex
-	closed []string
+	mu       sync.Mutex
+	closed   []string
+	closeErr error
 }
 
 func (*fakeConnectionsAPI) Snapshot(context.Context) ([]engine.ActiveConnection, error) {
@@ -37,7 +41,7 @@ func (f *fakeConnectionsAPI) Close(_ context.Context, id string) error {
 	f.mu.Lock()
 	f.closed = append(f.closed, id)
 	f.mu.Unlock()
-	return nil
+	return f.closeErr
 }
 
 func (f *fakeConnectionsAPI) closedIDs() []string {
@@ -79,6 +83,8 @@ type partialPanel struct {
 	nodeErr  error
 	users    []model.User
 	usersErr error
+	alive    model.AliveUsers
+	aliveErr error
 }
 
 type parallelPanel struct {
@@ -117,8 +123,25 @@ func (p *partialPanel) GetUsers(context.Context) ([]model.User, bool, error) {
 	return p.users, p.users != nil, p.usersErr
 }
 
-func (*partialPanel) GetAlive(context.Context) (model.AliveUsers, error) {
-	return model.AliveUsers{}, nil
+func (p *partialPanel) GetAlive(context.Context) (model.AliveUsers, error) {
+	return p.alive, p.aliveErr
+}
+
+func TestSyncPanelDiscardsStaleAliveCountsAfterFailures(t *testing.T) {
+	panel := &partialPanel{aliveErr: errors.New("alive unavailable")}
+	controller := &Controller{
+		panel:          panel,
+		logger:         log.New(io.Discard, "", 0),
+		alive:          model.AliveUsers{1: 9},
+		aliveReady:     true,
+		aliveUpdatedAt: time.Now().Add(-aliveStateMaxAge),
+	}
+	if _, err := controller.syncPanel(context.Background()); err != nil {
+		t.Fatalf("alive-only failure made control-plane sync fail: %v", err)
+	}
+	if controller.aliveReady || len(controller.alive) != 0 {
+		t.Fatalf("stale alive state retained: ready=%v alive=%#v", controller.aliveReady, controller.alive)
+	}
 }
 
 func (*partialPanel) ReportTraffic(context.Context, []model.UserTraffic) error { return nil }
@@ -183,6 +206,10 @@ func TestPolicyOnlyUpdatePreservesUnchangedOnlineUsers(t *testing.T) {
 	controller := &Controller{
 		haveActive: true,
 		online:     tracker,
+		lastOnlineReport: map[int]map[netip.Addr]struct{}{
+			1: {netip.MustParseAddr("192.0.2.1"): {}},
+			2: {netip.MustParseAddr("192.0.2.2"): {}},
+		},
 		active: RuntimeState{Policies: map[int]UserPolicy{
 			1: {DeviceLimit: 2},
 			2: {DeviceLimit: 2},
@@ -200,6 +227,31 @@ func TestPolicyOnlyUpdatePreservesUnchangedOnlineUsers(t *testing.T) {
 	}
 	if tracker.Has(2, "192.0.2.2") {
 		t.Fatal("changed user's online state was retained")
+	}
+	if len(controller.lastOnlineReport[1]) != 1 || controller.lastOnlineReport[2] != nil {
+		t.Fatalf("report overlap was not reconciled with policy changes: %#v", controller.lastOnlineReport)
+	}
+}
+
+func TestEngineReplacementClearsAllOnlineReportOverlap(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &Controller{
+		haveActive: true,
+		online:     tracker,
+		lastOnlineReport: map[int]map[netip.Addr]struct{}{
+			99: {netip.MustParseAddr("192.0.2.99"): {}},
+		},
+		lastOnlineReportAt: time.Now(),
+		active:             RuntimeState{EngineUsers: map[string]int{"uid-1": 1}},
+	}
+	if !controller.resetOnlinePolicyState(RuntimeState{}, true) {
+		t.Fatal("engine replacement did not request a reseed")
+	}
+	if len(controller.lastOnlineReport) != 0 || !controller.lastOnlineReportAt.IsZero() {
+		t.Fatalf("engine replacement retained report overlap: %#v at %v", controller.lastOnlineReport, controller.lastOnlineReportAt)
 	}
 }
 
@@ -220,8 +272,13 @@ func (p *accountingPanel) ReportTraffic(_ context.Context, traffic []model.UserT
 	return nil
 }
 
-func (*accountingPanel) ReportOnline(context.Context, model.OnlineUsers) error {
-	return nil
+func (p *accountingPanel) ReportOnline(_ context.Context, online model.OnlineUsers) error {
+	clone := make(model.OnlineUsers, len(online))
+	for userID, addresses := range online {
+		clone[userID] = append([]string(nil), addresses...)
+	}
+	p.online = append(p.online, clone)
+	return p.onlineErr
 }
 
 func TestForceTrafficReportDrainsInflightAndPendingGenerations(t *testing.T) {
@@ -396,6 +453,285 @@ func TestProcessConnectionsAdvancesPanelAliveBaseline(t *testing.T) {
 	closed := connections.closedIDs()
 	if len(closed) != 1 || closed[0] != "rejected" {
 		t.Fatalf("closed connections = %#v", closed)
+	}
+}
+
+func TestProcessConnectionsRejectsEveryNewIPWhenPanelBaselineIsFull(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:               cfg,
+		connections:       connections,
+		online:            tracker,
+		alive:             model.AliveUsers{1: 1},
+		aliveReady:        true,
+		connectionsSeeded: true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 1}},
+		},
+		haveActive: true,
+	}
+	start := time.Unix(1_700_000_000, 0)
+	err = controller.processConnections(context.Background(), []engine.ActiveConnection{
+		{ID: "new-a", User: "uid-1", SourceIP: netip.MustParseAddr("192.0.2.100"), StartedAt: start},
+		{ID: "new-b", User: "uid-1", SourceIP: netip.MustParseAddr("192.0.2.101"), StartedAt: start.Add(time.Second)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracker.Len() != 0 {
+		t.Fatalf("new IP retained despite full panel baseline: %#v", tracker.SnapshotMap())
+	}
+	if got := connections.closedIDs(); len(got) != 2 || got[0] != "new-a" || got[1] != "new-b" {
+		t.Fatalf("closed connections = %#v", got)
+	}
+}
+
+func TestFailedOnlineReportIsNotSubtractedFromAliveBaseline(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Observe(1, "192.0.2.110"); err != nil {
+		t.Fatal(err)
+	}
+	panel := &accountingPanel{onlineErr: errors.New("report failed")}
+	controller := &Controller{
+		panel:            panel,
+		online:           tracker,
+		lastOnlineReport: make(map[int]map[netip.Addr]struct{}),
+	}
+	if err := controller.reportOnline(context.Background()); !errors.Is(err, panel.onlineErr) {
+		t.Fatalf("reportOnline error = %v", err)
+	}
+	if len(controller.lastOnlineReport) != 0 {
+		t.Fatalf("failed payload was remembered: %#v", controller.lastOnlineReport)
+	}
+
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller.cfg = cfg
+	controller.connections = connections
+	controller.alive = model.AliveUsers{1: 1}
+	controller.aliveReady = true
+	controller.connectionsSeeded = true
+	controller.active = RuntimeState{
+		Backend:     "sing-box",
+		EngineUsers: map[string]int{"uid-1": 1},
+		Policies:    map[int]UserPolicy{1: {DeviceLimit: 1}},
+	}
+	if err := controller.processConnections(context.Background(), []engine.ActiveConnection{{
+		ID: "new", User: "uid-1", SourceIP: netip.MustParseAddr("192.0.2.111"), StartedAt: time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.Has(1, "192.0.2.111") || len(connections.closedIDs()) != 1 {
+		t.Fatalf("failed report was subtracted from panel baseline: state=%#v closed=%#v", tracker.SnapshotMap(), connections.closedIDs())
+	}
+}
+
+func TestProcessConnectionsDoesNotDoubleCountLocalPanelOverlap(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Observe(1, "192.0.2.50"); err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:         cfg,
+		connections: connections,
+		online:      tracker,
+		alive:       model.AliveUsers{1: 1},
+		aliveReady:  true,
+		lastOnlineReport: map[int]map[netip.Addr]struct{}{
+			1: {netip.MustParseAddr("192.0.2.50"): {}},
+		},
+		lastOnlineReportAt: time.Now().Add(-time.Second),
+		aliveUpdatedAt:     time.Now(),
+		connectionsSeeded:  true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 1}},
+		},
+		haveActive: true,
+	}
+	replacement := netip.MustParseAddr("192.0.2.51")
+	if err := controller.processConnections(context.Background(), []engine.ActiveConnection{{
+		ID: "replacement", User: "uid-1", SourceIP: replacement, StartedAt: time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.Has(1, replacement.String()) || len(connections.closedIDs()) != 0 {
+		t.Fatalf("local panel overlap rejected replacement: state=%#v closed=%#v", tracker.SnapshotMap(), connections.closedIDs())
+	}
+}
+
+func TestProcessConnectionsCombinesRemotePanelAndLocalDevices(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Observe(1, "192.0.2.60"); err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:         cfg,
+		connections: connections,
+		online:      tracker,
+		alive:       model.AliveUsers{1: 2}, // one local report + one remote IP
+		aliveReady:  true,
+		lastOnlineReport: map[int]map[netip.Addr]struct{}{
+			1: {netip.MustParseAddr("192.0.2.60"): {}},
+		},
+		lastOnlineReportAt: time.Now().Add(-time.Second),
+		aliveUpdatedAt:     time.Now(),
+		connectionsSeeded:  true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 2}},
+		},
+		haveActive: true,
+	}
+	newDevice := netip.MustParseAddr("192.0.2.61")
+	if err := controller.processConnections(context.Background(), []engine.ActiveConnection{
+		{ID: "existing-local", User: "uid-1", SourceIP: netip.MustParseAddr("192.0.2.60"), StartedAt: time.Now().Add(-time.Second)},
+		{ID: "over-limit", User: "uid-1", SourceIP: newDevice, StartedAt: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.Has(1, newDevice.String()) {
+		t.Fatal("new device was admitted despite one active remote panel device")
+	}
+	if got := connections.closedIDs(); len(got) != 1 || got[0] != "over-limit" {
+		t.Fatalf("closed connections = %#v", got)
+	}
+}
+
+func TestProcessConnectionsDoesNotSubtractReportNewerThanAliveSnapshot(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:            cfg,
+		connections:    connections,
+		online:         tracker,
+		alive:          model.AliveUsers{1: 1},
+		aliveReady:     true,
+		aliveUpdatedAt: time.Now().Add(-time.Minute),
+		lastOnlineReport: map[int]map[netip.Addr]struct{}{
+			1: {netip.MustParseAddr("192.0.2.120"): {}},
+		},
+		lastOnlineReportAt: time.Now(),
+		connectionsSeeded:  true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 1}},
+		},
+		haveActive: true,
+	}
+	if err := controller.processConnections(context.Background(), []engine.ActiveConnection{{
+		ID: "new", User: "uid-1", SourceIP: netip.MustParseAddr("192.0.2.121"), StartedAt: time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.Has(1, "192.0.2.121") || len(connections.closedIDs()) != 1 {
+		t.Fatalf("newer report was subtracted from older alive snapshot: state=%#v closed=%#v", tracker.SnapshotMap(), connections.closedIDs())
+	}
+}
+
+func TestProcessConnectionsRollsBackNewSlotWhenRejectCloseFails(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Minute, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := &fakeConnectionsAPI{closeErr: errors.New("close failed")}
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:               cfg,
+		connections:       connections,
+		online:            tracker,
+		alive:             model.AliveUsers{1: 1},
+		aliveReady:        true,
+		connectionsSeeded: true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 2}},
+		},
+		haveActive: true,
+	}
+	older := netip.MustParseAddr("192.0.2.70")
+	newer := netip.MustParseAddr("192.0.2.71")
+	err = controller.processConnections(context.Background(), []engine.ActiveConnection{
+		{ID: "admitted", User: "uid-1", SourceIP: older, StartedAt: time.Now().Add(-time.Second)},
+		{ID: "rejected", User: "uid-1", SourceIP: newer, StartedAt: time.Now()},
+	})
+	if err == nil {
+		t.Fatal("close failure was not returned")
+	}
+	if tracker.Has(1, older.String()) || tracker.Has(1, newer.String()) {
+		t.Fatalf("new policy slot survived close failure: %#v", tracker.SnapshotMap())
+	}
+}
+
+func TestProcessConnectionsFreesDisconnectedDeviceSlotImmediately(t *testing.T) {
+	tracker, err := state.NewOnlineTracker(time.Hour, 16, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := new(fakeConnectionsAPI)
+	cfg := config.Defaults()
+	cfg.Runtime.HTTPTimeout.Duration = time.Second
+	controller := &Controller{
+		cfg:               cfg,
+		connections:       connections,
+		online:            tracker,
+		alive:             make(model.AliveUsers),
+		connectionsSeeded: true,
+		active: RuntimeState{
+			Backend:     "sing-box",
+			EngineUsers: map[string]int{"uid-1": 1},
+			Policies:    map[int]UserPolicy{1: {DeviceLimit: 1}},
+		},
+		haveActive: true,
+	}
+	if err := tracker.Reserve(1, "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+
+	newDevice := netip.MustParseAddr("192.0.2.11")
+	snapshot := []engine.ActiveConnection{{ID: "replacement", User: "uid-1", SourceIP: newDevice, StartedAt: time.Now()}}
+	if err := controller.processConnections(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.Has(1, "192.0.2.10") || !tracker.Has(1, newDevice.String()) {
+		t.Fatalf("disconnected slot was not replaced: %#v", tracker.SnapshotMap())
+	}
+	if got := connections.closedIDs(); len(got) != 0 {
+		t.Fatalf("replacement device was rejected: %#v", got)
 	}
 }
 

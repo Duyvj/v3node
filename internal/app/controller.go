@@ -26,6 +26,7 @@ import (
 const (
 	trafficForceFlushInterval = 5 * time.Minute
 	connectionsPollInterval   = 5 * time.Second
+	aliveStateMaxAge          = 5 * time.Minute
 )
 
 type PanelAPI interface {
@@ -59,21 +60,24 @@ type Controller struct {
 	traffic     *state.TrafficAccumulator
 	online      *state.OnlineTracker
 
-	runtimePath       string
-	trafficPath       string
-	desiredNode       *model.NodeConfig
-	desiredUsers      []model.User
-	haveUsers         bool
-	desiredDirty      bool
-	active            RuntimeState
-	haveActive        bool
-	activeHash        [32]byte
-	alive             model.AliveUsers
-	aliveReady        bool
-	connectionsSeeded bool
-	lastCheckpoint    time.Time
-	lastTrafficFlush  time.Time
-	rejectedDevices   atomic.Uint64
+	runtimePath        string
+	trafficPath        string
+	desiredNode        *model.NodeConfig
+	desiredUsers       []model.User
+	haveUsers          bool
+	desiredDirty       bool
+	active             RuntimeState
+	haveActive         bool
+	activeHash         [32]byte
+	alive              model.AliveUsers
+	aliveReady         bool
+	aliveUpdatedAt     time.Time
+	lastOnlineReport   map[int]map[netip.Addr]struct{}
+	lastOnlineReportAt time.Time
+	connectionsSeeded  bool
+	lastCheckpoint     time.Time
+	lastTrafficFlush   time.Time
+	rejectedDevices    atomic.Uint64
 }
 
 func NewController(opts ControllerOptions) (*Controller, error) {
@@ -118,18 +122,19 @@ func NewController(opts ControllerOptions) (*Controller, error) {
 		return nil, err
 	}
 	return &Controller{
-		cfg:         opts.Config,
-		panel:       opts.Panel,
-		supervisor:  opts.Supervisor,
-		logger:      opts.Logger,
-		stats:       stats,
-		connections: connections,
-		apiSecret:   apiSecret,
-		traffic:     accumulator,
-		online:      online,
-		runtimePath: filepath.Join(opts.Config.Engine.StateDir, "runtime.json"),
-		trafficPath: trafficPath,
-		alive:       make(model.AliveUsers),
+		cfg:              opts.Config,
+		panel:            opts.Panel,
+		supervisor:       opts.Supervisor,
+		logger:           opts.Logger,
+		stats:            stats,
+		connections:      connections,
+		apiSecret:        apiSecret,
+		traffic:          accumulator,
+		online:           online,
+		runtimePath:      filepath.Join(opts.Config.Engine.StateDir, "runtime.json"),
+		trafficPath:      trafficPath,
+		alive:            make(model.AliveUsers),
+		lastOnlineReport: make(map[int]map[netip.Addr]struct{}),
 	}, nil
 }
 
@@ -311,10 +316,17 @@ func (c *Controller) syncPanel(ctx context.Context) (bool, error) {
 		c.desiredDirty = true
 	}
 	if aliveResponse.err != nil {
-		c.logger.Printf("panel alive-list refresh failed; previous counts retained: %v", aliveResponse.err)
+		if c.aliveReady && !c.aliveUpdatedAt.IsZero() && time.Since(c.aliveUpdatedAt) >= aliveStateMaxAge {
+			c.alive = make(model.AliveUsers)
+			c.aliveReady = false
+			c.logger.Printf("panel alive-list refresh failed; stale counts discarded: %v", aliveResponse.err)
+		} else {
+			c.logger.Printf("panel alive-list refresh failed; recent counts retained: %v", aliveResponse.err)
+		}
 	} else {
 		c.alive = aliveResponse.alive
 		c.aliveReady = true
+		c.aliveUpdatedAt = time.Now()
 	}
 	changed := false
 	// Node and users form one desired generation. Do not combine a freshly
@@ -417,7 +429,10 @@ func (c *Controller) resetOnlinePolicyState(next RuntimeState, replacesEngine bo
 	if replacesEngine {
 		for _, userID := range c.active.EngineUsers {
 			c.online.ForgetUser(userID)
+			delete(c.lastOnlineReport, userID)
 		}
+		clearOnlineReport(c.lastOnlineReport)
+		c.lastOnlineReportAt = time.Time{}
 		return true
 	}
 	reseed := false
@@ -427,6 +442,7 @@ func (c *Controller) resetOnlinePolicyState(next RuntimeState, replacesEngine bo
 		current := next.Policies[userID]
 		if !exists || nextUserID != userID || current.DeviceLimit != previous.DeviceLimit {
 			c.online.ForgetUser(userID)
+			delete(c.lastOnlineReport, userID)
 			reseed = true
 		}
 	}
@@ -437,8 +453,12 @@ func (c *Controller) resetOnlinePolicyState(next RuntimeState, replacesEngine bo
 		current, exists := next.Policies[userID]
 		if !exists || current.DeviceLimit != previous.DeviceLimit {
 			c.online.ForgetUser(userID)
+			delete(c.lastOnlineReport, userID)
 			reseed = true
 		}
+	}
+	if len(c.lastOnlineReport) == 0 {
+		c.lastOnlineReportAt = time.Time{}
 	}
 	return reseed
 }
@@ -518,6 +538,25 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 		observation.traffic = saturatingAddTraffic(observation.traffic, saturatingTraffic(connection.Upload, connection.Download))
 		observations[key] = observation
 	}
+	// Snapshot() is complete and bounded. Reconcile retained policy slots with
+	// that authoritative local view so disconnected devices free a slot on the
+	// next poll instead of lingering until online_ip_ttl. Only already-admitted
+	// pairs are retained here; new IPs still pass through the policy check below.
+	activeAddresses := make(map[int]map[netip.Addr]bool)
+	policyUsers := make(map[int]struct{})
+	for key := range observations {
+		if c.active.Policies[key.userID].DeviceLimit > 0 {
+			policyUsers[key.userID] = struct{}{}
+			addresses := activeAddresses[key.userID]
+			if addresses == nil {
+				addresses = make(map[netip.Addr]bool)
+				activeAddresses[key.userID] = addresses
+			}
+			addresses[key.address] = false
+		}
+	}
+	snapshotState := c.online.ReconcileSnapshot(activeAddresses, policyUsers)
+	snapshotGeneration := snapshotState.Generation
 
 	// The first complete snapshot seeds every user deterministically. Later
 	// snapshots only need deterministic ordering for users with an actual
@@ -544,41 +583,41 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 		return devices[i].key.address.Compare(devices[j].key.address) < 0
 	})
 
-	localCounts := make(map[int]int)
+	localCounts := snapshotState.LiveByUser
+	if c.connectionsSeeded && c.aliveReady {
+		reportCurrent := !c.lastOnlineReportAt.IsZero() && !c.aliveUpdatedAt.Before(c.lastOnlineReportAt)
+		for userID := range policyUsers {
+			reportedLocal := 0
+			if reportCurrent {
+				reportedLocal = c.lastReportedCount(userID)
+			}
+			remoteBaseline := c.alive[userID] - reportedLocal
+			if remoteBaseline > 0 {
+				localCounts[userID] += remoteBaseline
+			}
+		}
+	}
 	rejected := make(map[connectionDeviceKey]struct{})
+	admitted := make(map[connectionDeviceKey]struct{})
 	processDevice := func(device connectionDeviceObservation) error {
 		userID := device.key.userID
 		address := device.key.address.String()
 		policy := c.active.Policies[userID]
 		if policy.DeviceLimit > 0 {
-			known := c.online.Has(userID, address)
-			count, initialized := localCounts[userID]
-			if !initialized {
-				count = c.online.UserLen(userID)
-			}
+			known := activeAddresses[userID][device.key.address]
+			count := localCounts[userID]
 			if !known {
-				current := count
-				// The first complete snapshot seeds the locally accepted set.
-				// Afterwards the panel count is a lower bound for devices active
-				// on other nodes or retained by the panel's own online TTL.
-				if c.connectionsSeeded && c.aliveReady && c.alive[userID] > current {
-					current = c.alive[userID]
-				}
-				if current >= policy.DeviceLimit {
+				if count >= policy.DeviceLimit {
 					rejected[device.key] = struct{}{}
-					localCounts[userID] = count
 					return nil
 				}
-				// The panel's alive count is the baseline for devices which may
-				// be active on another node. Advance that effective count, rather
-				// than only the smaller local count, so several new IPs in one
-				// snapshot cannot each consume the same remaining panel slot.
-				count = current + 1
+				count++
 			}
 			localCounts[userID] = count
 			if err := c.online.Reserve(userID, address); err != nil {
 				return err
 			}
+			admitted[device.key] = struct{}{}
 		}
 		// Traffic is aggregated per user/IP. Splitting activity over many tiny
 		// connections can no longer evade the panel's reporting threshold.
@@ -626,7 +665,23 @@ func (c *Controller) processConnections(ctx context.Context, connections []engin
 		seenIDs[connection.ID] = struct{}{}
 		ids = append(ids, connection.ID)
 	}
-	return c.closeRejectedConnections(ctx, ids)
+	if err := c.closeRejectedConnections(ctx, ids); err != nil {
+		// Do not let a newly admitted replacement occupy a slot when an older
+		// over-limit connection could not be closed. The next complete poll will
+		// retry deterministically from the live connection set.
+		for key := range admitted {
+			c.online.ForgetIfAcceptedIn(key.userID, key.address.String(), snapshotGeneration)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Controller) lastReportedCount(userID int) int {
+	if c.lastOnlineReport == nil {
+		return 0
+	}
+	return len(c.lastOnlineReport[userID])
 }
 
 func (c *Controller) closeRejectedConnections(ctx context.Context, ids []string) error {
@@ -699,18 +754,52 @@ func (c *Controller) pushReports(ctx context.Context) error {
 	if err := c.reportTraffic(ctx, forceTraffic); err != nil {
 		reportErrors = append(reportErrors, err)
 	}
-	online := c.online.SnapshotReportableMap()
-	onlinePayload := make(model.OnlineUsers, len(online))
-	for userID, addresses := range online {
-		onlinePayload[userID] = addresses
-	}
-	if err := c.panel.ReportOnline(ctx, onlinePayload); err != nil {
+	if err := c.reportOnline(ctx); err != nil {
 		reportErrors = append(reportErrors, err)
 	}
 	if err := c.saveTrafficCheckpoint(); err != nil {
 		reportErrors = append(reportErrors, err)
 	}
 	return errors.Join(reportErrors...)
+}
+
+func (c *Controller) reportOnline(ctx context.Context) error {
+	online := c.online.SnapshotReportableMap()
+	onlinePayload := make(model.OnlineUsers, len(online))
+	for userID, addresses := range online {
+		onlinePayload[userID] = addresses
+	}
+	if err := c.panel.ReportOnline(ctx, onlinePayload); err != nil {
+		return err
+	}
+	c.rememberOnlineReport(onlinePayload)
+	return nil
+}
+
+func (c *Controller) rememberOnlineReport(online model.OnlineUsers) {
+	reported := make(map[int]map[netip.Addr]struct{}, len(online))
+	for userID, values := range online {
+		addresses := make(map[netip.Addr]struct{}, len(values))
+		for _, value := range values {
+			address, err := netip.ParseAddr(value)
+			if err == nil && address.Zone() == "" {
+				addresses[address.Unmap()] = struct{}{}
+			}
+		}
+		if len(addresses) > 0 {
+			reported[userID] = addresses
+		}
+	}
+	clearOnlineReport(c.lastOnlineReport)
+	c.lastOnlineReport = reported
+	c.lastOnlineReportAt = time.Now()
+}
+
+func clearOnlineReport(report map[int]map[netip.Addr]struct{}) {
+	for userID, addresses := range report {
+		clear(addresses)
+		delete(report, userID)
+	}
 }
 
 func (c *Controller) reportTraffic(ctx context.Context, force bool) error {

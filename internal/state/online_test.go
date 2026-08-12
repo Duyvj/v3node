@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"strings"
 	"sync"
@@ -59,6 +60,22 @@ func TestOnlineTrackerGlobalLRU(t *testing.T) {
 	}
 	if got := tracker.SnapshotAt(start.Add(5 * time.Second)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Snapshot = %#v, want %#v", got, want)
+	}
+}
+
+func TestOnlineTrackerReservationEvictsReportingEntryBeforePolicyEntry(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Hour, 2, 2)
+	if err := tracker.Reserve(1, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Observe(2, "192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Reserve(3, "192.0.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.Has(1, "192.0.2.1") || !tracker.Has(3, "192.0.2.3") || tracker.Has(2, "192.0.2.2") {
+		t.Fatalf("policy slot was displaced by reporting state: %#v", tracker.SnapshotMap())
 	}
 }
 
@@ -198,6 +215,132 @@ func TestOnlineTrackerReserveDoesNotReportUntilObserved(t *testing.T) {
 	got := tracker.SnapshotReportableMap()
 	if len(got[7]) != 1 || got[7][0] != "192.0.2.7" {
 		t.Fatalf("observed device was not promoted: %#v", got)
+	}
+}
+
+func TestOnlineTrackerSnapshotReconciliationRemovesDisconnectedPairs(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Hour, 10, 5)
+	if err := tracker.Observe(7, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Reserve(7, "192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+
+	active := map[int]map[netip.Addr]bool{7: {netip.MustParseAddr("192.0.2.2"): false}}
+	state := tracker.ReconcileSnapshot(active, map[int]struct{}{7: {}})
+	if state.LiveByUser[7] != 1 || !active[7][netip.MustParseAddr("192.0.2.2")] {
+		t.Fatalf("unexpected reconciled counts: %#v", state)
+	}
+	if tracker.Has(7, "192.0.2.1") || !tracker.Has(7, "192.0.2.2") {
+		t.Fatalf("unexpected reconciled state: %#v", tracker.SnapshotMap())
+	}
+}
+
+func TestOnlineTrackerSnapshotMarksReportableAndReservedPairs(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Minute, 10, 5)
+	if err := tracker.Observe(7, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Reserve(7, "192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	active := map[int]map[netip.Addr]bool{7: {
+		netip.MustParseAddr("192.0.2.1"): false,
+		netip.MustParseAddr("192.0.2.2"): false,
+	}}
+	state := tracker.ReconcileSnapshot(active, map[int]struct{}{7: {}})
+	if state.LiveByUser[7] != 2 || !active[7][netip.MustParseAddr("192.0.2.1")] || !active[7][netip.MustParseAddr("192.0.2.2")] {
+		t.Fatalf("retained snapshot state = %#v active=%#v", state, active)
+	}
+}
+
+func TestOnlineTrackerConditionalForgetPreservesOlderPair(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Minute, 10, 5)
+	if err := tracker.Reserve(7, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	state := tracker.ReconcileSnapshot(map[int]map[netip.Addr]bool{}, map[int]struct{}{7: {}})
+	if tracker.ForgetIfAcceptedIn(7, "192.0.2.1", state.Generation) {
+		t.Fatal("older accepted pair was forgotten")
+	}
+	if err := tracker.Reserve(7, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.ForgetIfAcceptedIn(7, "192.0.2.1", state.Generation) {
+		t.Fatal("newly accepted pair was not forgotten")
+	}
+}
+
+func TestOnlineTrackerSnapshotStateTracksRetainedPairs(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Minute, 10, 5)
+	if err := tracker.Reserve(7, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	active := map[int]map[netip.Addr]bool{}
+	state := tracker.ReconcileSnapshot(active, map[int]struct{}{7: {}})
+	if state.LiveByUser[7] != 0 {
+		t.Fatal("unretained pair was treated as present in the snapshot")
+	}
+	tracker.Reserve(7, "192.0.2.1")
+	active = map[int]map[netip.Addr]bool{7: {netip.MustParseAddr("192.0.2.1"): false}}
+	state = tracker.ReconcileSnapshot(active, map[int]struct{}{7: {}})
+	if !active[7][netip.MustParseAddr("192.0.2.1")] {
+		t.Fatal("retained pair was not marked present in the snapshot")
+	}
+}
+
+func TestOnlineTrackerReconcileCanonicalizesMappedIPv4(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Minute, 10, 5)
+	if err := tracker.Reserve(7, "192.0.2.9"); err != nil {
+		t.Fatal(err)
+	}
+	active := map[int]map[netip.Addr]bool{7: {netip.MustParseAddr("::ffff:192.0.2.9"): false}}
+	state := tracker.ReconcileSnapshot(active, map[int]struct{}{7: {}})
+	if state.LiveByUser[7] != 1 || !active[7][netip.MustParseAddr("192.0.2.9")] {
+		t.Fatalf("mapped IPv4 was not reconciled canonically: %#v", state)
+	}
+}
+
+func TestOnlineTrackerReconcilePreservesUnlimitedUserReportingTTL(t *testing.T) {
+	tracker := mustOnlineTracker(t, time.Hour, 10, 5)
+	if err := tracker.Observe(8, "192.0.2.80"); err != nil {
+		t.Fatal(err)
+	}
+	tracker.ReconcileSnapshot(map[int]map[netip.Addr]bool{}, map[int]struct{}{7: {}})
+	if !tracker.Has(8, "192.0.2.80") {
+		t.Fatal("unlimited user's reporting TTL entry was removed by policy reconciliation")
+	}
+}
+
+func BenchmarkOnlineTrackerReconcileSnapshot(b *testing.B) {
+	const users = 1_000
+	tracker, err := NewOnlineTracker(time.Hour, users*4, 4)
+	if err != nil {
+		b.Fatal(err)
+	}
+	policyUsers := make(map[int]struct{}, users)
+	active := make(map[int]map[netip.Addr]bool, users)
+	for userID := 1; userID <= users; userID++ {
+		address := netip.AddrFrom4([4]byte{198, 18, byte(userID >> 8), byte(userID)})
+		if err := tracker.Reserve(userID, address.String()); err != nil {
+			b.Fatal(err)
+		}
+		policyUsers[userID] = struct{}{}
+		active[userID] = map[netip.Addr]bool{address: false}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		for _, addresses := range active {
+			for address := range addresses {
+				addresses[address] = false
+			}
+		}
+		state := tracker.ReconcileSnapshot(active, policyUsers)
+		if len(state.LiveByUser) != users {
+			b.Fatalf("live users = %d", len(state.LiveByUser))
+		}
 	}
 }
 
