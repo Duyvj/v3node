@@ -193,8 +193,9 @@ the server cannot enable them transparently for existing clients. QUIC-native
 profiles are useful alternatives on lossy paths, but are not universal
 anti-blocking defaults: nationwide measurements have shown that the GFW can
 decrypt QUIC Initial packets and filter by SNI. Experimental sing-box 1.14
-client-side TLS spoofing and fragmentation features remain outside the pinned stable engine until a
-stable release, panel contract, client rollout and resource soak tests exist.
+client-side TLS spoofing and fragmentation features remain outside the pinned
+stable engine until a stable release, panel contract, client rollout and
+resource soak tests exist.
 
 Primary references for this policy are the upstream
 [Xray transport matrix](https://xtls.github.io/en/config/transport.html),
