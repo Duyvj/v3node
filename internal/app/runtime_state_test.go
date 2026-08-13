@@ -22,6 +22,7 @@ func TestRuntimeStatePersistsEngineGenerationHash(t *testing.T) {
 		PullIntervalNanos: int64(30 * time.Second),
 		PushIntervalNanos: int64(30 * time.Second),
 		Listener:          RuntimeListener{Protocol: "vless", Port: 443},
+		ManagementSHA256:  protectedManagementSHA256(nil),
 	}
 	state.ConfigSHA256 = hex.EncodeToString(hash[:])
 	path := filepath.Join(t.TempDir(), "runtime.json")
@@ -47,6 +48,7 @@ func TestRuntimeStateRejectsMissingGenerationHash(t *testing.T) {
 		PullIntervalNanos: int64(30 * time.Second),
 		PushIntervalNanos: int64(30 * time.Second),
 		Listener:          RuntimeListener{Protocol: "vless", Port: 443},
+		ManagementSHA256:  protectedManagementSHA256(nil),
 	}
 	if err := state.Validate(10, 15*time.Second, time.Hour, 15*time.Second, time.Hour); err == nil {
 		t.Fatal("expected missing generation hash to be rejected")
@@ -64,7 +66,7 @@ func TestRuntimeStateOmitsZeroPoliciesAndUsesCompactJSON(t *testing.T) {
 		PullInterval: 30 * time.Second,
 		PushInterval: 30 * time.Second,
 	}
-	state := RuntimeStateFromCompiled("sing-box", compiled, map[string]int{"uid-1": 1, "uid-2": 2}, hash)
+	state := RuntimeStateFromCompiled("sing-box", compiled, map[string]int{"uid-1": 1, "uid-2": 2}, hash, []string{"127.0.0.1:10085", "127.0.0.1:10086"})
 	if len(state.Policies) != 1 || state.Policies[2].DeviceLimit != 3 {
 		t.Fatalf("unexpected compact policies: %#v", state.Policies)
 	}
@@ -122,7 +124,7 @@ func TestRuntimeStatePersistsOnlyPublicListenerIdentity(t *testing.T) {
 		PullInterval: 30 * time.Second,
 		PushInterval: 30 * time.Second,
 	}
-	state := RuntimeStateFromCompiled("sing-box", compiled, nil, hash)
+	state := RuntimeStateFromCompiled("sing-box", compiled, nil, hash, []string{"127.0.0.1:10085", "127.0.0.1:10086"})
 	if state.Listener.Protocol != "hysteria2" || state.Listener.Listen != "::" || state.Listener.Port != 8443 {
 		t.Fatalf("public listener identity = %#v", state.Listener)
 	}
@@ -136,5 +138,30 @@ func TestRuntimeStatePersistsOnlyPublicListenerIdentity(t *testing.T) {
 	}
 	if bytes.Contains(data, []byte("must-not-be-persisted")) {
 		t.Fatalf("runtime metadata leaked engine secrets: %s", data)
+	}
+}
+
+func TestRuntimeStateBindsLastKnownGoodToManagementSet(t *testing.T) {
+	hash := sha256.Sum256([]byte("management generation"))
+	compiled := CompiledState{
+		Node:         engine.NodeSpec{Protocol: "vless", Port: 443},
+		PullInterval: 30 * time.Second,
+		PushInterval: 30 * time.Second,
+	}
+	state := RuntimeStateFromCompiled("sing-box", compiled, nil, hash, []string{
+		"127.0.0.1:12086",
+		"127.0.0.1:11085",
+	})
+	if !runtimeStateProtectsManagement(state, []string{"127.0.0.1:11085", "127.0.0.1:12086"}) {
+		t.Fatal("reordering the same management set invalidated last-known-good")
+	}
+	if runtimeStateProtectsManagement(state, []string{"127.0.0.1:11085", "127.0.0.1:13086"}) {
+		t.Fatal("changed management endpoint retained last-known-good compatibility")
+	}
+	legacy := state
+	legacy.Version = 3
+	legacy.ManagementSHA256 = ""
+	if runtimeStateProtectsManagement(legacy, []string{"127.0.0.1:11085", "127.0.0.1:12086"}) {
+		t.Fatal("runtime v3 without a management binding was accepted for multi-node restore")
 	}
 }

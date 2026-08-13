@@ -257,11 +257,11 @@ func (c *Controller) restoreLastKnownGood(ctx context.Context) {
 		}
 		return
 	}
-	if c.listenerGuard != nil && stateValue.Listener.Port == 0 {
-		// Runtime-state v2 did not record a public listener, so a multi-node
-		// process cannot reserve it before starting the old engine. Wait for a
-		// fresh panel reconciliation instead of risking an in-process collision.
-		c.logger.Printf("last-known-good metadata predates multi-node listener isolation; waiting for panel synchronization")
+	if c.listenerGuard != nil && !runtimeStateProtectsManagement(stateValue, c.cfg.ProtectedManagement) {
+		// Older runtime metadata did not bind the accepted engine configuration
+		// to the complete management endpoint set. In multi-node mode, restoring
+		// it could expose a newly added node's loopback API to VPN users.
+		c.logger.Printf("last-known-good metadata does not match current multi-node management isolation; waiting for panel synchronization")
 		return
 	}
 	binary := c.binaryFor(stateValue.Backend)
@@ -450,7 +450,7 @@ func (c *Controller) reconcile(ctx context.Context) error {
 		}
 		return fmt.Errorf("apply engine configuration: %w", err)
 	}
-	runtimeState := RuntimeStateFromCompiled(rendered.Backend, compiled, rendered.Users, candidateHash)
+	runtimeState := RuntimeStateFromCompiled(rendered.Backend, compiled, rendered.Users, candidateHash, c.cfg.ProtectedManagement)
 	persistErr := SaveRuntimeState(c.runtimePath, runtimeState)
 	// Seed the new policy generation from actual connections. This also makes
 	// a lowered device limit take effect when Apply can keep an identical data

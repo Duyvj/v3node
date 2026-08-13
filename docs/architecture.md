@@ -47,6 +47,13 @@ numeric public ports, even if their protocols would otherwise use different
 TCP/UDP sockets. Public listener ports are authoritative panel data, not local
 installer options.
 
+Runtime metadata binds each accepted engine generation to a hash of the full
+management-endpoint set. If nodes or management ports change, an older
+multi-node last-known-good engine is not restored while its panel is offline;
+the worker waits for a fresh render that blocks the current endpoint set. This
+fail-closed rule prevents an old route table from exposing a newly added node's
+loopback API. Singleton version-2/3 last-known-good compatibility remains.
+
 ## Policy enforcement and connection inventory
 
 Policy values are accepted only when the selected data plane can enforce them:

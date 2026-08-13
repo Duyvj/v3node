@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/Duyvj/v3node/internal/engine"
 )
 
-const runtimeStateVersion = 3
+const runtimeStateVersion = 4
 
 type UserPolicy struct {
 	SpeedLimit  int `json:"speed_limit"`
@@ -36,6 +38,7 @@ type RuntimeState struct {
 	DeviceOnlineMinBytes int64              `json:"device_online_min_bytes"`
 	NodeReportMinBytes   int64              `json:"node_report_min_bytes"`
 	Listener             RuntimeListener    `json:"listener"`
+	ManagementSHA256     string             `json:"management_sha256,omitempty"`
 }
 
 // RuntimeListener persists only what is needed to claim the public port
@@ -47,7 +50,7 @@ type RuntimeListener struct {
 	Port     uint16 `json:"port"`
 }
 
-func RuntimeStateFromCompiled(backend string, compiled CompiledState, engineUsers map[string]int, configHash [sha256.Size]byte) RuntimeState {
+func RuntimeStateFromCompiled(backend string, compiled CompiledState, engineUsers map[string]int, configHash [sha256.Size]byte, management []string) RuntimeState {
 	// Most panels leave both optional limits at zero. Persist only effective
 	// policy rows so runtime.json stays small on large nodes.
 	policies := make(map[int]UserPolicy)
@@ -71,7 +74,24 @@ func RuntimeStateFromCompiled(backend string, compiled CompiledState, engineUser
 		DeviceOnlineMinBytes: compiled.DeviceOnlineMinBytes,
 		NodeReportMinBytes:   compiled.NodeReportMinBytes,
 		Listener:             runtimeListenerSpec(compiled.Node),
+		ManagementSHA256:     protectedManagementSHA256(management),
 	}
+}
+
+func protectedManagementSHA256(addresses []string) string {
+	ordered := append([]string(nil), addresses...)
+	sort.Strings(ordered)
+	hash := sha256.New()
+	for _, address := range ordered {
+		_, _ = hash.Write([]byte(strconv.Itoa(len(address))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(address))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func runtimeStateProtectsManagement(state RuntimeState, addresses []string) bool {
+	return state.Version >= runtimeStateVersion && state.ManagementSHA256 == protectedManagementSHA256(addresses)
 }
 
 func runtimeListenerSpec(node engine.NodeSpec) RuntimeListener {
@@ -96,7 +116,7 @@ func (s RuntimeState) PullInterval() time.Duration { return time.Duration(s.Pull
 func (s RuntimeState) PushInterval() time.Duration { return time.Duration(s.PushIntervalNanos) }
 
 func (s RuntimeState) Validate(maxUsers int, minPull, maxPull, minPush, maxPush time.Duration) error {
-	if s.Version != 2 && s.Version != runtimeStateVersion {
+	if s.Version != 2 && s.Version != 3 && s.Version != runtimeStateVersion {
 		return fmt.Errorf("unsupported runtime state version %d", s.Version)
 	}
 	if s.Backend != "sing-box" && s.Backend != "xray" {
@@ -107,6 +127,12 @@ func (s RuntimeState) Validate(maxUsers int, minPull, maxPull, minPush, maxPush 
 	}
 	if s.Version >= 3 && s.Listener.Listen != "" && net.ParseIP(s.Listener.Listen) == nil {
 		return errors.New("runtime state contains an invalid public listen address")
+	}
+	if s.Version >= runtimeStateVersion {
+		decoded, err := hex.DecodeString(s.ManagementSHA256)
+		if err != nil || len(decoded) != sha256.Size {
+			return errors.New("runtime state contains an invalid management protection SHA256")
+		}
 	}
 	if _, err := s.ConfigHash(); err != nil {
 		return err

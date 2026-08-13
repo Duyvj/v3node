@@ -49,6 +49,9 @@ Legacy runtime metadata that predates persisted listener identity is not
 started as last-known-good inside a multi-node process; the worker waits for a
 fresh panel synchronization so it can reserve the correct public port first.
 The singleton upgrade path keeps its version-2 last-known-good behavior.
+Likewise, a multi-node last-known-good generation is restored only when its
+persisted management-set hash matches the current full set; adding/remapping a
+node while another panel is offline therefore fails closed for that old worker.
 
 ## Protocol and engine matrix
 

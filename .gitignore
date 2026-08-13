@@ -10,3 +10,4 @@
 /.gomodcache/
 /.cache/
 /.release-test/
+/.release-beta*/
