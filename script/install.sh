@@ -7,8 +7,8 @@ umask 077
 # This branch bootstrap stays small and pins a reviewed release. The release
 # installer carries the architecture-specific artifact hashes and rollback
 # logic; never execute an unverified second-stage script.
-readonly V3NODE_BOOTSTRAP_VERSION=0.3.0-beta.5
-readonly V3NODE_INSTALL_SHA256=bdc2fc20ba85730177e0574cc43973e706881ca1497cc7e8d1cd57856b4f35ec
+readonly V3NODE_BOOTSTRAP_VERSION=0.3.0-beta.6
+readonly V3NODE_INSTALL_SHA256=0eb6dfcb0f24edb409933cdfb2afda9f4b0b842637c907ee3d23a163b3ff636a
 readonly RELEASE_BASE="https://github.com/Duyvj/v3node/releases/download/v${V3NODE_BOOTSTRAP_VERSION}"
 
 work_directory=
