@@ -6,11 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -19,9 +16,7 @@ import (
 
 	"github.com/Duyvj/v3node/internal/app"
 	"github.com/Duyvj/v3node/internal/config"
-	"github.com/Duyvj/v3node/internal/engine"
 	"github.com/Duyvj/v3node/internal/panel"
-	noderuntime "github.com/Duyvj/v3node/internal/runtime"
 )
 
 var (
@@ -171,131 +166,78 @@ func runServer(args []string, stdout, stderr io.Writer) error {
 			debug.SetMemoryLimit(int64(config.EffectiveGOMEMLIMIT(total)))
 		}
 	}
-	logger := log.New(stderr, "v3node: ", log.LstdFlags|log.LUTC|log.Lmsgprefix)
-	panelClient, err := newPanelClient(cfg)
+	workerConfigs, err := cfg.NodeConfigs()
 	if err != nil {
 		return err
 	}
-	defer panelClient.Close()
-	supervisor, err := noderuntime.NewSupervisor(noderuntime.SupervisorOptions{
-		Directory:   filepath.Join(cfg.Engine.StateDir, "engine"),
-		StopTimeout: cfg.Engine.StopTimeout.Duration,
-		Stdout:      stdout,
-		Stderr:      stderr,
-		Logger:      logger,
-		HealthProbe: func(ctx context.Context) error {
-			var lastErr error
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				connection, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", cfg.Engine.StatsListen)
-				if err == nil {
-					return connection.Close()
-				}
-				lastErr = err
-				select {
-				case <-ctx.Done():
-					return fmt.Errorf("stats API is not listening: %w", lastErr)
-				case <-ticker.C:
-				}
+	management := allManagementAddresses(workerConfigs)
+	guard := listenerGuardForWorkers(len(workerConfigs))
+	workers := make([]*workerBundle, 0, len(workerConfigs))
+	for _, workerConfig := range workerConfigs {
+		workerConfig.ProtectedManagement = append([]string(nil), management...)
+		worker, bundleErr := newWorkerBundle(workerConfig, stdout, stderr, guard)
+		if bundleErr != nil {
+			for _, created := range workers {
+				created.panel.Close()
+				_ = created.supervisor.Close(context.Background())
 			}
-		},
-	})
-	if err != nil {
-		return err
-	}
-	controller, err := app.NewController(app.ControllerOptions{
-		Config:     cfg,
-		Panel:      panelClient,
-		Supervisor: supervisor,
-		Logger:     logger,
-	})
-	if err != nil {
-		return err
+			return fmt.Errorf("prepare node %s: %w", workerConfig.NodeName(), bundleErr)
+		}
+		workers = append(workers, worker)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return controller.Run(ctx)
+	return runWorkerBundles(ctx, workers)
 }
 
 func runCheck(args []string, stdout, stderr io.Writer) error {
+	return runCheckWith(args, stdout, stderr, fetchCheckCandidate, validateCheckCandidate)
+}
+
+func runCheckWith(args []string, stdout, stderr io.Writer, fetch checkCandidateFetcher, validate checkCandidateValidator) error {
 	flags, configPath := configFlagSet("check", stderr)
-	timeout := flags.Duration("timeout", 30*time.Second, "total online validation timeout")
+	timeout := flags.Duration("timeout", 30*time.Second, "online validation timeout for each node")
 	renderOnly := flags.Bool("render-only", false, "skip the engine binary check")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *timeout <= 0 {
+		return errors.New("check --timeout must be positive")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
-	client, err := newPanelClient(cfg)
+	workerConfigs, err := cfg.NodeConfigs()
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	node, changed, err := client.GetNodeConfig(ctx)
-	if err != nil {
-		return err
-	}
-	if !changed || node == nil {
-		return errors.New("panel returned no node configuration")
-	}
-	users, changed, err := client.GetUsers(ctx)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return errors.New("panel returned no user configuration")
-	}
-	compiled, err := app.CompileState(*node, users, cfg)
-	if err != nil {
-		return err
-	}
-	for _, warning := range engine.SecurityWarnings(compiled.Node) {
-		fmt.Fprintf(stderr, "v3node: security warning: %s\n", warning)
-	}
-	if compiled.Node.TLS.ManagedSelfSigned && runtime.GOOS == "linux" && os.Geteuid() == 0 {
-		return errors.New("self-signed TLS check must run as the v3node service user (sudo -u v3node v3node check)")
-	}
-	renderer, err := engine.Select(cfg.Engine.Backend, compiled.Node)
-	if err != nil {
-		return err
-	}
-	if err := app.ValidateBackendPolicies(renderer.Name(), compiled.Users); err != nil {
-		return err
-	}
-	if err := app.EnsureManagedCertificate(compiled.Node); err != nil {
-		return fmt.Errorf("prepare managed TLS certificate: %w", err)
-	}
-	apiSecret, err := app.LoadOrCreateAPISecret(cfg.Engine.StateDir)
-	if err != nil {
-		return err
-	}
-	rendered, err := renderer.Render(compiled.Node, compiled.Users, engine.Options{
-		LogLevel:        cfg.Runtime.LogLevel,
-		StatsListen:     cfg.Engine.StatsListen,
-		ClashListen:     cfg.Engine.ClashListen,
-		ClashSecret:     apiSecret,
-		AddressStrategy: cfg.Network.AddressStrategy,
-		DNSServers:      cfg.Network.DNSServers,
-		BlockPrivate:    cfg.Network.BlockPrivate != nil && *cfg.Network.BlockPrivate,
-	})
-	if err != nil {
-		return err
-	}
-	if !*renderOnly {
-		binary := cfg.Engine.SingBoxBinary
-		if rendered.Backend == "xray" {
-			binary = cfg.Engine.XrayBinary
+	management := allManagementAddresses(workerConfigs)
+	candidates := make([]checkCandidate, 0, len(workerConfigs))
+	seenPorts := make(map[uint16]string, len(workerConfigs))
+	for _, workerConfig := range workerConfigs {
+		workerConfig.ProtectedManagement = append([]string(nil), management...)
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		candidate, checkErr := fetch(ctx, workerConfig, stderr)
+		cancel()
+		if checkErr != nil {
+			return fmt.Errorf("node %s: %w", workerConfig.NodeName(), checkErr)
 		}
-		if err := noderuntime.CheckEngineConfig(ctx, rendered.Backend, binary, rendered.Config, stderr); err != nil {
-			return err
+		port := candidate.compiled.Node.Port
+		if owner, exists := seenPorts[port]; exists {
+			return fmt.Errorf("node %s and %s both use public port %d; multi-node ports must differ", owner, workerConfig.NodeName(), port)
+		}
+		seenPorts[port] = workerConfig.NodeName()
+		candidates = append(candidates, candidate)
+	}
+	for _, candidate := range candidates {
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		checkErr := validate(ctx, candidate, stdout, stderr, *renderOnly)
+		cancel()
+		if checkErr != nil {
+			return fmt.Errorf("node %s: %w", candidate.config.NodeName(), checkErr)
 		}
 	}
-	fmt.Fprintf(stdout, "OK: backend=%s protocol=%s users=%d config_bytes=%d\n", rendered.Backend, compiled.Node.Protocol, len(compiled.Users), len(rendered.Config))
 	return nil
 }
 
@@ -308,7 +250,14 @@ func runDiagnose(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "local_config=ok\nnode_id=%d\nengine_mode=%s\n", cfg.Panel.NodeID, cfg.Engine.Backend)
+	workers, err := cfg.NodeConfigs()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "local_config=ok\nnode_count=%d\nengine_mode=%s\n", len(workers), cfg.Engine.Backend)
+	for _, worker := range workers {
+		fmt.Fprintf(stdout, "node=%s node_id=%d state_dir=%s stats_api=%s connections_api=%s\n", worker.NodeName(), worker.Panel.NodeID, worker.Engine.StateDir, worker.Engine.StatsListen, worker.Engine.ClashListen)
+	}
 	for name, path := range map[string]string{"sing-box": cfg.Engine.SingBoxBinary, "xray": cfg.Engine.XrayBinary} {
 		status := "missing"
 		if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
@@ -316,8 +265,7 @@ func runDiagnose(args []string, stdout, stderr io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "engine_%s=%s\n", name, status)
 	}
-	fmt.Fprintf(stdout, "stats_api=%s\nconnections_api=%s\n", cfg.Engine.StatsListen, cfg.Engine.ClashListen)
-	fmt.Fprintf(stdout, "state_dir=%s\nmax_users=%d\nmax_online_ips=%d\n", cfg.Engine.StateDir, cfg.Runtime.MaxUsers, cfg.Runtime.MaxOnlineIPs)
+	fmt.Fprintf(stdout, "max_users_per_node=%d\nmax_online_ips_per_node=%d\n", cfg.Runtime.MaxUsers, cfg.Runtime.MaxOnlineIPs)
 	if total := app.HostMemoryBytes(); total > 0 {
 		fmt.Fprintf(stdout, "host_memory_bytes=%d\ncontroller_soft_heap_bytes=%d\n", total, config.EffectiveGOMEMLIMIT(total))
 	}

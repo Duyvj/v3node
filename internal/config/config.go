@@ -60,10 +60,16 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 }
 
 type Config struct {
-	Panel   PanelConfig   `json:"panel"`
+	Panel   PanelConfig   `json:"panel,omitempty"`
+	Nodes   []NodeEntry   `json:"nodes,omitempty"`
 	Engine  EngineConfig  `json:"engine"`
 	Runtime RuntimeConfig `json:"runtime"`
 	Network NetworkConfig `json:"network"`
+
+	// Instance and ProtectedManagement are process-local expansions used by
+	// the multi-node manager. They are never read from or written to JSON.
+	Instance            string   `json:"-"`
+	ProtectedManagement []string `json:"-"`
 }
 
 type PanelConfig struct {
@@ -183,6 +189,9 @@ func Load(path string) (Config, error) {
 	if err := cfg.resolveToken(); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.resolveNodeTokens(path); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -209,6 +218,16 @@ func (c *Config) resolveToken() error {
 		c.Panel.Token = strings.TrimSpace(c.Panel.Token)
 		return nil
 	}
+	info, err := os.Lstat(c.Panel.TokenFile)
+	if err != nil {
+		return fmt.Errorf("inspect panel token file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("panel token path is not a regular file")
+	}
+	if info.Size() > maxTokenBytes {
+		return errors.New("panel token file is too large")
+	}
 	f, err := os.Open(c.Panel.TokenFile)
 	if err != nil {
 		return fmt.Errorf("open panel token file: %w", err)
@@ -222,10 +241,18 @@ func (c *Config) resolveToken() error {
 		return errors.New("panel token file is too large")
 	}
 	c.Panel.Token = strings.TrimSpace(string(data))
+	clear(data)
 	return nil
 }
 
 func (c Config) Validate() error {
+	if len(c.Nodes) > 0 {
+		return c.validateMulti()
+	}
+	return c.validateSingle()
+}
+
+func (c Config) validateSingle() error {
 	u, err := url.Parse(c.Panel.URL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("panel.url must be an absolute base URL without credentials, query, or fragment")
@@ -236,8 +263,11 @@ func (c Config) Validate() error {
 	if c.Panel.NodeID <= 0 {
 		return errors.New("panel.node_id must be positive")
 	}
-	if c.Panel.Token == "" {
+	if c.Panel.Token == "" && c.Panel.TokenFile == "" {
 		return errors.New("panel token is empty")
+	}
+	if c.Panel.TokenFile != "" && !isAbsoluteConfigPath(c.Panel.TokenFile) {
+		return errors.New("panel.token_file must be an absolute path")
 	}
 	if c.Panel.TLSCAFile != "" && !filepath.IsAbs(c.Panel.TLSCAFile) {
 		return errors.New("panel.tls_ca_file must be an absolute path")

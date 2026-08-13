@@ -174,7 +174,8 @@ func (r SingBoxRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (
 	if err != nil {
 		return Rendered{}, err
 	}
-	protectedCIDRs, protectedPorts, err := protectedManagementEndpoints(opts.StatsListen, opts.ClashListen)
+	managementAddresses := append([]string{opts.StatsListen, opts.ClashListen}, opts.ProtectedManagement...)
+	protectedCIDRs, protectedPorts, err := protectedManagementEndpoints(managementAddresses...)
 	if err != nil {
 		return Rendered{}, err
 	}

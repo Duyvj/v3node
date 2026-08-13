@@ -43,7 +43,7 @@ readonly BACKUP_ROOT=/var/backups/v3node
 config_source=
 token_source=
 panel_url=
-panel_node_id=
+declare -a panel_node_ids=()
 api_key=
 local_v3node_file=
 local_v3node_sha256=
@@ -77,7 +77,8 @@ Usage: install.sh [options]
                             root:v3node ownership and mode 0640.
   --panel-url URL           Generate config.json for this panel URL.
   --api-host URL            Compatibility alias for --panel-url.
-  --node-id ID              Positive node ID used with --panel-url.
+  --node-id ID              Positive node ID used with --panel-url. Repeat
+                            this option to run multiple nodes on one VPS.
                             Requires --api-key or --token-file and conflicts
                             with --config.
   --api-key KEY             Compatibility alternative to --token-file.
@@ -131,7 +132,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --node-id)
             [[ $# -ge 2 ]] || die '--node-id requires an integer'
-            panel_node_id=$2
+            panel_node_ids+=("$2")
             shift 2
             ;;
         --api-key)
@@ -323,7 +324,8 @@ verify_xray_features() {
 }
 
 stage_inputs() {
-    local bytes controller_version
+    local bytes controller_version panel_node_id
+    local -a generate_args
     stage_dir=$(mktemp -d /tmp/v3node-install.XXXXXX)
     chmod 0700 "$stage_dir"
 
@@ -363,12 +365,16 @@ stage_inputs() {
         die "controller binary does not report release version ${V3NODE_VERSION}"
     fi
     if [[ -n ${panel_url} ]]; then
-        "$stage_dir/v3node" generate \
-            --config "$stage_dir/config.json" \
-            --panel-url "$panel_url" \
-            --node-id "$panel_node_id" \
-            --token-file "${CONFIG_DIR}/panel.token" \
-            --skip-ownership \
+        generate_args=(
+            --config "$stage_dir/config.json"
+            --panel-url "$panel_url"
+            --token-file "${CONFIG_DIR}/panel.token"
+            --skip-ownership
+        )
+        for panel_node_id in "${panel_node_ids[@]}"; do
+            generate_args+=(--node-id "$panel_node_id")
+        done
+        "$stage_dir/v3node" generate "${generate_args[@]}" \
             || die 'could not generate configuration from --panel-url and --node-id'
         chmod 0600 "$stage_dir/config.json"
         config_source=$stage_dir/config.json
@@ -1171,7 +1177,8 @@ install_staged_files() {
 }
 
 main() {
-    local managed_directory
+    local managed_directory panel_node_id
+    local -A seen_node_ids=()
     require_supported_host
     select_architecture
 
@@ -1216,9 +1223,15 @@ main() {
         [[ -f ${token_source} && ! -L ${token_source} ]] || die '--token-file must reference a regular file'
     fi
     [[ -z ${api_key} || -z ${token_source} ]] || die '--api-key conflicts with --token-file'
-    if [[ -n ${panel_url} || -n ${panel_node_id} || -n ${api_key} ]]; then
-        [[ -n ${panel_url} && -n ${panel_node_id} ]] || die '--api-host/--panel-url and --node-id must be used together'
-        [[ ${panel_node_id} =~ ^[1-9][0-9]*$ ]] || die '--node-id must be a positive integer'
+    if [[ -n ${panel_url} || -n ${api_key} ]] || ((${#panel_node_ids[@]} > 0)); then
+        [[ -n ${panel_url} ]] || die '--api-host/--panel-url and --node-id must be used together'
+        ((${#panel_node_ids[@]} > 0)) || die '--api-host/--panel-url and --node-id must be used together'
+        ((${#panel_node_ids[@]} <= 16)) || die 'at most 16 --node-id options are supported'
+        for panel_node_id in "${panel_node_ids[@]}"; do
+            [[ ${panel_node_id} =~ ^[1-9][0-9]*$ ]] || die '--node-id must be a positive integer'
+            [[ -z ${seen_node_ids[$panel_node_id]+present} ]] || die "duplicate --node-id: ${panel_node_id}"
+            seen_node_ids[$panel_node_id]=1
+        done
         [[ -z ${config_source} ]] || die '--api-host/--panel-url conflicts with --config'
         [[ -n ${token_source} || -n ${api_key} ]] || die '--api-host/--panel-url requires --api-key or --token-file'
     fi

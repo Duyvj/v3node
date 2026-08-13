@@ -36,14 +36,14 @@ sing-box assets from the same release and verifies their SHA256 plus reported
 version, architecture, and build tags. It also downloads the pinned official
 Xray 26.3.27 archive, verifies its SHA256 and reported version, and installs the
 root `xray` executable, GeoIP/GeoSite data and license from that reviewed
-archive. At runtime only the engine selected for the current node is started.
+archive. At runtime each configured node starts only its selected engine.
 
 ## Clean VPS installation
 
 A supported clean VPS does not need the original wyx2685/v2node, Go, sing-box,
 or Xray preinstalled. The installer creates the unprivileged service account
 and managed directories, installs the controller plus both pinned engines, and
-starts only the engine selected by the panel node configuration. The development
+starts only the engine selected by each panel node configuration. The development
 source tree cannot install from the network because its project asset hashes are
 deliberately locked. The separate `script/install.sh` branch bootstrap pins a
 reviewed release and its exact installer SHA-256 before execution; otherwise
@@ -66,6 +66,24 @@ bash install.sh \
   --node-id 73 \
   --api-key 'your-api-key'
 ```
+
+Repeat `--node-id` to install multiple nodes from the same panel on one VPS:
+
+```bash
+bash install.sh \
+  --api-host 'https://panel.example.com' \
+  --node-id 26 \
+  --node-id 25 \
+  --node-id 27 \
+  --api-key 'your-api-key'
+```
+
+The installer accepts at most 16 distinct IDs. It generates one configuration
+and one `v3node.service`; `v3node start`, `restart`, `status`, and `log` operate
+on that service and therefore cover every configured node. The panel supplies
+each node's public VPN port. Those numeric ports must be unique on the VPS,
+including across TCP and UDP protocols, and must not match an internal
+Stats/Connections port; the pre-start check rejects a collision.
 
 This compatibility form exposes the key to shell history and process argv.
 The installer never logs it and stores it only in `/etc/v3node/panel.token`,
@@ -104,17 +122,68 @@ sudo ./install.sh \
   --token-file ./panel.token
 ```
 
-Set the HTTPS panel URL and positive node ID. Add `network.dns_servers` only
+The same token file can be shared by several NodeIDs on one panel. Add another
+`--node-id` for each node; do not duplicate the ID and do not exceed 16. The
+generator records stable per-node state directories and loopback management
+ports, so reordering the same ID arguments does not swap their local state.
+
+The installed `config.example.json` deliberately remains a singleton example
+for existing operators. A manual multi-node file can replace `panel` with a
+`nodes` array such as:
+
+```json
+{
+  "nodes": [
+    {
+      "name": "node-26-1a2b3c4d5e6f7a8b",
+      "api_host": "https://panel.example.com",
+      "node_id": 26,
+      "token_file": "/etc/v3node/panel.token",
+      "state_dir": "/var/lib/v3node/nodes/node-26-1a2b3c4d5e6f7a8b",
+      "stats_listen": "127.0.0.1:21085",
+      "clash_listen": "127.0.0.1:21086"
+    },
+    {
+      "name": "node-25-5e6f7a8b9c0d1e2f",
+      "api_host": "https://panel.example.com",
+      "node_id": 25,
+      "token_file": "/etc/v3node/panel.token",
+      "state_dir": "/var/lib/v3node/nodes/node-25-5e6f7a8b9c0d1e2f",
+      "stats_listen": "127.0.0.1:22085",
+      "clash_listen": "127.0.0.1:22086"
+    }
+  ]
+}
+```
+
+Missing engine/runtime/network sections retain their defaults. Native entries
+use `api_host`, `node_id`, and `token_file`; the compatibility parser also
+accepts v2node-style `ApiHost`, `NodeID`, `ApiKey`, and `Timeout`. Prefer
+`token_file` because inline `ApiKey` places a secret in JSON. Omit the legacy
+top-level `panel` identity when `nodes` is present. Each worker must have a
+unique name, state directory, Stats port, and Connections/Clash port.
+The numbers above are illustrative; the quick installer derives and persists
+stable names, state directories and loopback ports from the canonical panel
+identity plus NodeID. Changing panels therefore cannot reuse another panel's
+runtime, traffic, API secret or TLS defaults merely because the numeric NodeID
+matches. Multi-node generation never assigns the legacy singleton state
+directory or its management ports to a guessed NodeID, so an old node's traffic
+checkpoint and last-known-good state cannot silently move to another node.
+Existing singleton data remains untouched.
+
+Set the HTTPS panel URL and positive node ID(s). Add `network.dns_servers` only
 when regional resolvers have been deliberately selected. There is no local
 switch that changes the GeoIP identity of the VPS address.
 
 For a TLS `file` (non-Reality) node, provision the panel-selected certificate
 and key before running `v3node check`. If the panel leaves their paths empty,
 install them as `/etc/v3node/<protocol><node-id>.cer` and `.key`, owned by
-`root:v3node` with certificate mode `0644` or stricter and key mode `0640`.
-For `cert_mode=self`, `v3node check` creates a private ECDSA pair atomically
-below `/var/lib/v3node/certificates`. Automatic `dns` and `http` ACME modes are
-not implemented in this beta.
+`root:v3node` with certificate mode `0644` or stricter and key mode `0640` for
+a singleton config. Multi-node defaults live below
+`/etc/v3node/nodes/<name>/` to prevent equal NodeIDs from different panels
+colliding. For `cert_mode=self`, `v3node check` creates a private ECDSA pair
+atomically below the node's own state-directory `certificates/` subdirectory.
+Automatic `dns` and `http` ACME modes are not implemented in this beta.
 
 Then start and inspect the node:
 
@@ -124,6 +193,19 @@ sudo systemctl enable --now v3node.service
 systemctl status v3node.service
 sudo journalctl -u v3node.service -n 100 --no-pager
 ```
+
+In multi-node mode these commands check or manage all configured nodes. Output
+and journal lines include the stable node name. Each node has an independent
+panel client, controller, engine process, last-known-good data, traffic
+checkpoint, API secret, and loopback management endpoints. A candidate update
+for one node is validated and rolled back within that worker rather than
+sharing another node's state.
+
+This isolation has a resource cost: one controller process is shared, but each
+active node has its own engine process. Engine RAM therefore grows with node
+count, users, protocols, and concurrent sessions. The beta does not claim a
+fixed multi-node RSS or completed 2/4/8-node soak result; measure the intended
+mix on staging before consolidating production nodes.
 
 For later edits, `sudo v3node config` keeps a bounded `.bak`, runs the same
 online engine check, restarts only after validation, and restores/restarts the

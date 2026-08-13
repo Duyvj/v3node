@@ -76,3 +76,23 @@ func TestInteractiveMenuPromptsForGenerateArguments(t *testing.T) {
 		t.Fatalf("calls = %#v, want %#v", calls, expected)
 	}
 }
+
+func TestInteractiveMenuPromptsForMultipleGenerateNodeIDs(t *testing.T) {
+	var calls [][]string
+	input := "generate\nhttps://panel.example.com\n42, 43 44\n/etc/v3node/source.token\nexit\n"
+	status := runInteractiveMenu(strings.NewReader(input), io.Discard, io.Discard, func(args []string) int {
+		calls = append(calls, append([]string(nil), args...))
+		return 0
+	})
+	if status != 0 {
+		t.Fatalf("status = %d", status)
+	}
+	expected := [][]string{{
+		"generate", "--panel-url", "https://panel.example.com",
+		"--node-id", "42", "--node-id", "43", "--node-id", "44",
+		"--token-source", "/etc/v3node/source.token",
+	}}
+	if !reflect.DeepEqual(calls, expected) {
+		t.Fatalf("calls = %#v, want %#v", calls, expected)
+	}
+}

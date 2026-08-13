@@ -82,13 +82,14 @@ type RouteSpec struct {
 }
 
 type Options struct {
-	LogLevel        string
-	StatsListen     string
-	ClashListen     string
-	ClashSecret     string
-	AddressStrategy string
-	DNSServers      []string
-	BlockPrivate    bool
+	LogLevel            string
+	StatsListen         string
+	ClashListen         string
+	ProtectedManagement []string
+	ClashSecret         string
+	AddressStrategy     string
+	DNSServers          []string
+	BlockPrivate        bool
 }
 
 func protectedManagementEndpoints(addresses ...string) ([]string, []int, error) {

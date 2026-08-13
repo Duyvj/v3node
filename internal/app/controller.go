@@ -42,11 +42,19 @@ type ConnectionsAPI interface {
 	Close(context.Context, string) error
 }
 
+// ListenerGuard coordinates public listener claims when several isolated
+// workers share one v3node process. It is deliberately optional so the
+// single-node controller and its existing tests keep their behavior.
+type ListenerGuard interface {
+	Reserve(engine.NodeSpec, string) (release func(), err error)
+}
+
 type ControllerOptions struct {
-	Config     config.Config
-	Panel      PanelAPI
-	Supervisor *noderuntime.Supervisor
-	Logger     *log.Logger
+	Config        config.Config
+	Panel         PanelAPI
+	Supervisor    *noderuntime.Supervisor
+	Logger        *log.Logger
+	ListenerGuard ListenerGuard
 }
 
 type Controller struct {
@@ -78,6 +86,8 @@ type Controller struct {
 	lastCheckpoint     time.Time
 	lastTrafficFlush   time.Time
 	rejectedDevices    atomic.Uint64
+	listenerGuard      ListenerGuard
+	listenerRelease    func()
 }
 
 func NewController(opts ControllerOptions) (*Controller, error) {
@@ -135,6 +145,7 @@ func NewController(opts ControllerOptions) (*Controller, error) {
 		trafficPath:      trafficPath,
 		alive:            make(model.AliveUsers),
 		lastOnlineReport: make(map[int]map[netip.Addr]struct{}),
+		listenerGuard:    opts.ListenerGuard,
 	}, nil
 }
 
@@ -246,21 +257,44 @@ func (c *Controller) restoreLastKnownGood(ctx context.Context) {
 		}
 		return
 	}
+	if c.listenerGuard != nil && stateValue.Listener.Port == 0 {
+		// Runtime-state v2 did not record a public listener, so a multi-node
+		// process cannot reserve it before starting the old engine. Wait for a
+		// fresh panel reconciliation instead of risking an in-process collision.
+		c.logger.Printf("last-known-good metadata predates multi-node listener isolation; waiting for panel synchronization")
+		return
+	}
 	binary := c.binaryFor(stateValue.Backend)
 	expectedHash, err := stateValue.ConfigHash()
 	if err != nil {
 		c.logger.Printf("last-known-good metadata has an invalid generation hash: %v", err)
 		return
 	}
+	var release func()
+	if c.listenerGuard != nil && stateValue.Listener.Port != 0 {
+		release, err = c.listenerGuard.Reserve(engine.NodeSpec{
+			Protocol: stateValue.Listener.Protocol,
+			Listen:   stateValue.Listener.Listen,
+			Port:     stateValue.Listener.Port,
+		}, c.cfg.NodeName())
+		if err != nil {
+			c.logger.Printf("last-known-good public listener could not be reserved: %v", err)
+			return
+		}
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, c.cfg.Engine.CheckTimeout.Duration)
 	defer cancel()
 	if err := c.supervisor.StartExisting(checkCtx, stateValue.Backend, binary, expectedHash); err != nil {
+		if release != nil {
+			release()
+		}
 		c.logger.Printf("last-known-good engine could not start: %v", err)
 		return
 	}
 	c.active = stateValue
 	c.haveActive = true
 	c.activeHash = expectedHash
+	c.listenerRelease = release
 	c.logger.Printf("last-known-good %s engine started before panel synchronization", stateValue.Backend)
 }
 
@@ -361,13 +395,14 @@ func (c *Controller) reconcile(ctx context.Context) error {
 		c.logger.Printf("security warning: %s", warning)
 	}
 	rendered, err := renderer.Render(compiled.Node, compiled.Users, engine.Options{
-		LogLevel:        c.cfg.Runtime.LogLevel,
-		StatsListen:     c.cfg.Engine.StatsListen,
-		ClashListen:     c.cfg.Engine.ClashListen,
-		ClashSecret:     c.apiSecret,
-		AddressStrategy: c.cfg.Network.AddressStrategy,
-		DNSServers:      append([]string(nil), c.cfg.Network.DNSServers...),
-		BlockPrivate:    c.cfg.Network.BlockPrivate != nil && *c.cfg.Network.BlockPrivate,
+		LogLevel:            c.cfg.Runtime.LogLevel,
+		StatsListen:         c.cfg.Engine.StatsListen,
+		ClashListen:         c.cfg.Engine.ClashListen,
+		ProtectedManagement: append([]string(nil), c.cfg.ProtectedManagement...),
+		ClashSecret:         c.apiSecret,
+		AddressStrategy:     c.cfg.Network.AddressStrategy,
+		DNSServers:          append([]string(nil), c.cfg.Network.DNSServers...),
+		BlockPrivate:        c.cfg.Network.BlockPrivate != nil && *c.cfg.Network.BlockPrivate,
 	})
 	if err != nil {
 		return fmt.Errorf("render %s engine config: %w", renderer.Name(), err)
@@ -375,14 +410,27 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	candidateHash := sha256.Sum256(rendered.Config)
 	wasHealthy := c.haveActive && c.supervisor.Healthy()
 	replacesEngine := !c.haveActive || !wasHealthy || c.active.Backend != rendered.Backend || c.activeHash != candidateHash
+	var candidateRelease func()
+	if c.listenerGuard != nil && replacesEngine {
+		candidateRelease, err = c.listenerGuard.Reserve(compiled.Node, c.cfg.NodeName())
+		if err != nil {
+			return fmt.Errorf("reserve public listener: %w", err)
+		}
+	}
 	// Drain the old cumulative generation immediately before an engine
 	// replacement. The StatsClient baseline is committed only after the whole
 	// delta batch has been retained.
 	if wasHealthy && replacesEngine {
 		if err := c.collectStats(ctx); err != nil {
+			if candidateRelease != nil {
+				candidateRelease()
+			}
 			return fmt.Errorf("collect final traffic before engine update: %w", err)
 		}
 		if err := c.saveTrafficCheckpoint(); err != nil {
+			if candidateRelease != nil {
+				candidateRelease()
+			}
 			return fmt.Errorf("checkpoint traffic before engine update: %w", err)
 		}
 	}
@@ -397,6 +445,9 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	checkCtx, cancel := context.WithTimeout(ctx, c.cfg.Engine.CheckTimeout.Duration)
 	defer cancel()
 	if err := c.supervisor.Apply(checkCtx, rendered.Backend, c.binaryFor(rendered.Backend), rendered.Config); err != nil {
+		if candidateRelease != nil {
+			candidateRelease()
+		}
 		return fmt.Errorf("apply engine configuration: %w", err)
 	}
 	runtimeState := RuntimeStateFromCompiled(rendered.Backend, compiled, rendered.Users, candidateHash)
@@ -408,6 +459,12 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	c.active = runtimeState
 	c.haveActive = true
 	c.activeHash = candidateHash
+	if replacesEngine && c.listenerRelease != nil {
+		c.listenerRelease()
+	}
+	if replacesEngine {
+		c.listenerRelease = candidateRelease
+	}
 	if reseedConnections {
 		c.connectionsSeeded = false
 	}
@@ -871,7 +928,12 @@ func (c *Controller) shutdown(parent context.Context) error {
 		shutdownErrors = append(shutdownErrors, fmt.Errorf("save final traffic checkpoint: %w", err))
 	}
 	statsErr := c.stats.Close()
-	return errors.Join(errors.Join(shutdownErrors...), statsErr, c.supervisor.Close(stopCtx))
+	engineErr := c.supervisor.Close(stopCtx)
+	if c.listenerRelease != nil {
+		c.listenerRelease()
+		c.listenerRelease = nil
+	}
+	return errors.Join(errors.Join(shutdownErrors...), statsErr, engineErr)
 }
 
 func (c *Controller) setDesiredUsers(users []model.User) {

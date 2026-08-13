@@ -9,13 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/Duyvj/v3node/internal/engine"
 )
 
-const runtimeStateVersion = 2
+const runtimeStateVersion = 3
 
 type UserPolicy struct {
 	SpeedLimit  int `json:"speed_limit"`
@@ -32,6 +35,16 @@ type RuntimeState struct {
 	PushIntervalNanos    int64              `json:"push_interval_nanos"`
 	DeviceOnlineMinBytes int64              `json:"device_online_min_bytes"`
 	NodeReportMinBytes   int64              `json:"node_report_min_bytes"`
+	Listener             RuntimeListener    `json:"listener"`
+}
+
+// RuntimeListener persists only what is needed to claim the public port
+// before a last-known-good engine starts. It deliberately excludes panel
+// credentials, TLS key material, routes and transport settings.
+type RuntimeListener struct {
+	Protocol string `json:"protocol"`
+	Listen   string `json:"listen,omitempty"`
+	Port     uint16 `json:"port"`
 }
 
 func RuntimeStateFromCompiled(backend string, compiled CompiledState, engineUsers map[string]int, configHash [sha256.Size]byte) RuntimeState {
@@ -57,6 +70,15 @@ func RuntimeStateFromCompiled(backend string, compiled CompiledState, engineUser
 		PushIntervalNanos:    int64(compiled.PushInterval),
 		DeviceOnlineMinBytes: compiled.DeviceOnlineMinBytes,
 		NodeReportMinBytes:   compiled.NodeReportMinBytes,
+		Listener:             runtimeListenerSpec(compiled.Node),
+	}
+}
+
+func runtimeListenerSpec(node engine.NodeSpec) RuntimeListener {
+	return RuntimeListener{
+		Protocol: node.Protocol,
+		Listen:   node.Listen,
+		Port:     node.Port,
 	}
 }
 
@@ -74,11 +96,17 @@ func (s RuntimeState) PullInterval() time.Duration { return time.Duration(s.Pull
 func (s RuntimeState) PushInterval() time.Duration { return time.Duration(s.PushIntervalNanos) }
 
 func (s RuntimeState) Validate(maxUsers int, minPull, maxPull, minPush, maxPush time.Duration) error {
-	if s.Version != runtimeStateVersion {
+	if s.Version != 2 && s.Version != runtimeStateVersion {
 		return fmt.Errorf("unsupported runtime state version %d", s.Version)
 	}
 	if s.Backend != "sing-box" && s.Backend != "xray" {
 		return fmt.Errorf("invalid runtime backend %q", s.Backend)
+	}
+	if s.Version >= 3 && (s.Listener.Port == 0 || !validRuntimeProtocol(s.Listener.Protocol)) {
+		return errors.New("runtime state contains an invalid public listener")
+	}
+	if s.Version >= 3 && s.Listener.Listen != "" && net.ParseIP(s.Listener.Listen) == nil {
+		return errors.New("runtime state contains an invalid public listen address")
 	}
 	if _, err := s.ConfigHash(); err != nil {
 		return err
@@ -106,6 +134,15 @@ func (s RuntimeState) Validate(maxUsers int, minPull, maxPull, minPush, maxPush 
 		return errors.New("runtime state contains an interval outside local safety bounds")
 	}
 	return nil
+}
+
+func validRuntimeProtocol(protocol string) bool {
+	switch protocol {
+	case "vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls":
+		return true
+	default:
+		return false
+	}
 }
 
 func LoadRuntimeState(path string, maxUsers int, minPull, maxPull, minPush, maxPush time.Duration) (RuntimeState, error) {

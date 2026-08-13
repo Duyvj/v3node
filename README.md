@@ -16,7 +16,8 @@ source cũ.
 - Giữ RAM/CPU ổn định bằng giới hạn dữ liệu đầu vào, cache LRU có kích thước tối
   đa, bộ tích lũy report hữu hạn và checkpoint nguyên tử; không che lỗi rò RAM bằng
   một `MemoryMax` cứng có thể giết phiên đang hoạt động.
-- Chỉ chạy một data-plane engine phù hợp với node tại một thời điểm.
+- Một service/controller có thể quản lý tối đa 16 node; mỗi node chỉ chạy một
+  data-plane engine phù hợp tại một thời điểm và có state riêng.
 - Kiểm tra cấu hình mới trước khi dùng, lưu last-known-good và tự rollback nếu
   engine mới không khởi động/không khỏe.
 - Giữ controller, credential và data plane tách biệt. Controller không tự triển
@@ -28,19 +29,14 @@ source cũ.
 
 ```text
 Panel V2Board/v2node
-        │ HTTPS + API token
+        │ HTTPS + API token, một NodeID cho mỗi node
         ▼
-v3node controller (Go)
-  ├─ đồng bộ node/users
-  ├─ traffic + online-IP có giới hạn
-  ├─ render → check → apply → health-check → rollback
-  └─ lưu checkpoint và last-known-good
-        │ chỉ chọn một engine
-        ├───────────────┐
-        ▼               ▼
-  sing-box tùy biến   Xray nguyên bản
-        │               │
-        └──── direct egress qua mạng của VPS ──── Internet
+v3node.service → một controller process (Go)
+        ├─ worker node 26 → state/API riêng → sing-box hoặc Xray
+        ├─ worker node 25 → state/API riêng → sing-box hoặc Xray
+        └─ worker node 27 → state/API riêng → sing-box hoặc Xray
+                                      │
+                                      └─ direct egress qua mạng VPS → Internet
 ```
 
 Controller dùng các endpoint panel sau và luôn giữ `node_type=v2node`:
@@ -76,8 +72,10 @@ khi transport, Reality hoặc route cần riêng khả năng của Xray.
 
 Chế độ TLS `file` dùng chứng thư do quản trị viên cấp và gia hạn; nếu panel bỏ
 trống đường dẫn, controller dùng quy ước `/etc/v3node/<protocol><node-id>.cer`
-và `.key`. `cert_mode=self` được tạo một lần bằng ECDSA trong
-`/var/lib/v3node/certificates/`, không cần worker chạy nền. Bản beta chưa nhận
+và `.key` cho cấu hình singleton, hoặc thư mục
+`/etc/v3node/nodes/<name>/` tương ứng ở chế độ nhiều node. `cert_mode=self`
+được tạo một lần bằng ECDSA trong state riêng của node (singleton mặc định là
+`/var/lib/v3node/certificates/`), không cần worker chạy nền. Bản beta chưa nhận
 secret DNS từ panel để tự chạy ACME `dns`/`http`. `tls=1` cùng `cert_mode=none`
 giữ đúng hợp đồng TLS termination bên ngoài. Reality không dùng các file cert.
 
@@ -112,7 +110,7 @@ Các trạng thái cần hiểu rõ trong beta:
 | Đồng bộ cấu hình/users, report upload/download | Đã triển khai; tiếp tục cần soak/load test |
 | Giới hạn thiết bị theo IP | Enforce trên sing-box; cấu hình Xray có `device_limit > 0` bị từ chối rõ ràng |
 | `speed_limit` theo từng user | Enforce hữu hạn trên sing-box; cấu hình buộc dùng Xray có giá trị khác 0 bị từ chối rõ ràng |
-| Nhiều panel/node trong một process | Chưa có; mỗi cài đặt beta hiện quản lý một node |
+| Nhiều panel/node trong một process | Tối đa 16 node; controller/state/API quản trị và engine process được tách theo node; vẫn cần soak/load test nhiều node |
 | Cập nhật user không ngắt phiên | Chưa có; thay đổi cấu hình có thể restart engine và làm client reconnect |
 | Traffic qua lúc thay engine | Có final drain trước khi đổi engine và checkpoint; vẫn cần soak test đối soát dài hạn |
 
@@ -144,6 +142,17 @@ tiếp (khoảng 5 giây), không giữ oan slot đến hết TTL. Số `alive` 
 công gần nhất của chính node được trừ ra để tránh đếm hai lần. Payload report
 lỗi không được trừ; `alive` cũ cũng bị bỏ sau 5 phút lỗi liên tục để không khóa
 oan khách hàng vô thời hạn.
+
+Ở chế độ nhiều node, mỗi node có controller state, traffic checkpoint,
+Connections API và engine process riêng nên UID giống nhau không làm trộn bộ
+đếm local. Giới hạn thiết bị giữa các node vẫn dựa trên tổng `alive` do panel
+trả về và được hội tụ ở các vòng poll/report kế tiếp; đây không phải khóa tức
+thời dùng chung trong cùng process.
+
+Một controller process giúp tránh lặp phần điều phối, nhưng mỗi node vẫn cần một
+engine process vì listener, users, traffic và policy phải độc lập. Vì vậy RAM
+data plane tăng theo số node và tải thực tế; chưa có số RSS cố định hay tuyên bố
+soak cho cấu hình 2/4/8 node.
 
 Unit systemd không đặt hard RAM limit để tránh OOM-kill phiên hợp lệ khi tải tăng.
 Nó chạy bằng user `v3node`, chỉ có `CAP_NET_BIND_SERVICE`, bật accounting và giới
@@ -199,6 +208,24 @@ dùng đúng cú pháp quen thuộc của v2node gốc và chỉ thay link:
 wget -N https://raw.githubusercontent.com/Duyvj/v3node/main/script/install.sh && \
 bash install.sh --api-host 'https://panel.example.com' --node-id 73 --api-key 'your-api-key'
 ```
+
+Để chạy nhiều node cùng panel trên một VPS, lặp `--node-id` trong chính lệnh đó:
+
+```bash
+wget -N https://raw.githubusercontent.com/Duyvj/v3node/main/script/install.sh && \
+bash install.sh \
+  --api-host 'https://panel.example.com' \
+  --node-id 26 \
+  --node-id 25 \
+  --node-id 27 \
+  --api-key 'your-api-key'
+```
+
+Các NodeID phải khác nhau. Cổng VPN public không nhập ở lệnh cài mà lấy từ cấu
+hình từng node trên panel; mọi node trên cùng VPS phải dùng số cổng public khác
+nhau, kể cả khi một node dùng TCP và node khác dùng UDP. `v3node check` từ chối
+xung đột giữa các node hoặc với cổng API quản trị nội bộ trước khi service áp
+dụng cấu hình. Tối đa 16 NodeID trong một lần cài.
 
 `--api-host` là alias của `--panel-url`; `--api-key` được lưu thành
 `/etc/v3node/panel.token` với quyền hạn chế, không ghi vào `config.json` hay log.
@@ -259,6 +286,10 @@ tra online rồi mới restart và tự phục hồi nếu cấu hình mới l�
 installer sau khi kiểm tra `install.sh` bằng `SHA256SUMS` của cùng GitHub
 Release; build beta theo kênh prerelease, còn build stable mặc định bỏ qua
 prerelease.
+
+Chỉ có một `v3node.service`; vì vậy `v3node restart`, `v3node status` và
+`v3node log` quản lý/hiển thị toàn bộ node của cấu hình. Log có prefix tên node
+để phân biệt. Cấu hình một NodeID vẫn giữ schema và hành vi singleton cũ.
 
 Không đặt token trong câu lệnh, ảnh chụp hoặc repository. Production phải dùng
 HTTPS tới panel; HTTP chỉ dành cho mạng phát triển cô lập.

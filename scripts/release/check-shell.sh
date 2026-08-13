@@ -179,6 +179,31 @@ bash "$installer" \
     --api-key test-only-key \
     --help >/dev/null
 
+set +e
+duplicate_output=$(bash "$installer" \
+    --api-host https://panel.example.com \
+    --node-id 73 \
+    --node-id 73 \
+    --api-key test-only-key 2>&1)
+duplicate_status=$?
+set -e
+[[ $duplicate_status -ne 0 ]] || {
+    printf 'installer accepted duplicate --node-id values\n' >&2
+    exit 1
+}
+grep -Fq 'duplicate --node-id: 73' <<<"$duplicate_output" || {
+    printf 'installer duplicate-node test failed for an unexpected reason\n' >&2
+    exit 1
+}
+
+bash "$installer" \
+    --api-host https://panel.example.com \
+    --node-id 73 \
+    --node-id 74 \
+    --node-id 75 \
+    --api-key test-only-key \
+    --help >/dev/null
+
 readonly bootstrap=${project_root}/script/install.sh
 bootstrap_version=$(read_setting "$bootstrap" 'readonly ' V3NODE_BOOTSTRAP_VERSION)
 [[ $bootstrap_version =~ ^[0-9]+[.][0-9]+[.][0-9]+-beta[.][0-9]+$ ]] || {

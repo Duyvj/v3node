@@ -2,18 +2,21 @@
 
 v3node is a clean-room node controller. It implements the panel contract,
 configuration lifecycle, resource accounting, and engine supervision. It does
-not implement VPN cryptography. A separately supervised engine provides the
-protocol data plane.
+not implement VPN cryptography. One controller process hosts up to 16 isolated
+node workers; a separately supervised engine provides each worker's protocol
+data plane.
 
 ## Components
 
-1. The panel client retrieves node settings and users over HTTPS, with bounded
-   response bodies, explicit timeouts, conditional requests, and retry jitter.
-2. The controller validates panel data into engine-neutral models. Invalid or
-   incomplete updates never replace the last working configuration.
+1. Each worker's panel client retrieves node settings and users over HTTPS,
+   with bounded response bodies, explicit timeouts, conditional requests, and
+   retry jitter.
+2. Each node worker has its own panel client and validates panel data into
+   engine-neutral models. Invalid or incomplete updates never replace that
+   worker's last working configuration.
 3. An engine adapter renders a candidate configuration. The candidate is
    checked by the target engine before it can replace the active file.
-4. The supervisor stops the current engine, switches the configuration
+4. The node's supervisor stops its current engine, switches the configuration
    atomically, starts the selected engine, and confirms readiness. A failed
    replacement restores and restarts the previous configuration. An accepted
    change can therefore make existing clients reconnect; zero-downtime handover
@@ -30,9 +33,19 @@ measured loss/reconciliation test before release. This upstream limitation is
 tracked in [SagerNet/sing-box issue 4059](https://github.com/SagerNet/sing-box/issues/4059).
 
 The data-plane adapters are the project build of sing-box 1.13.18 and stock
-Xray 26.3.27. Both remain separate binaries and processes, and only the adapter
-selected for the current node runs. This provides process-level fault
-isolation, independent upgrades, and clear license boundaries.
+Xray 26.3.27. Both remain separate binaries, and only the adapter selected for
+each node runs. In multi-node mode that means one engine process per active
+node, while the Go controller process and systemd unit are shared. Per-node
+engine processes preserve listener, user, traffic, device-policy and failure
+boundaries; they also make engine RAM grow with the number and load of nodes.
+
+The local `nodes` array is expanded before workers start. Every identity has a
+stable name, state directory, Stats endpoint and authenticated Connections
+endpoint. All workers' management addresses are protected in every rendered
+data-plane configuration. A process-wide listener registry also rejects equal
+numeric public ports, even if their protocols would otherwise use different
+TCP/UDP sockets. Public listener ports are authoritative panel data, not local
+installer options.
 
 ## Policy enforcement and connection inventory
 
@@ -73,11 +86,20 @@ first snapshot of a policy generation is sorted, so the oldest existing
 sessions are seeded deterministically without paying the sort cost on every
 poll.
 
-The Connections endpoint is loopback-only and protected by a persistent random
-256-bit bearer secret generated at `/var/lib/v3node/api.secret` with mode
-`0600`. It is separate from the panel token. VPN-user routes to both internal
-management endpoints are rejected in the rendered configuration even when the
-operator permits other private destinations.
+Each Connections endpoint is loopback-only and protected by a persistent random
+256-bit bearer secret generated under that node's state directory with mode
+`0600`. It is separate from the panel token and from other nodes' secrets.
+Traffic checkpoints, online-IP inventory and device-policy state are likewise
+owned by one worker, so equal panel user IDs on two nodes do not share local
+counters. VPN-user routes to every node's internal management endpoints are
+rejected in every rendered configuration even when the operator permits other
+private destinations.
+
+Cross-node device enforcement still uses the panel's `alive` aggregate as an
+eventual global baseline. Each worker subtracts only its own last successfully
+posted online set before combining the remainder with its authoritative local
+snapshot. There is no synchronous in-process admission lock shared by nodes;
+the global result converges on subsequent panel poll/report cycles.
 
 The sing-box upstream license states GPL version 3 or later and includes an
 additional naming/association condition. Distributors must preserve that exact
@@ -107,6 +129,12 @@ comes from bounded inputs and retained state:
   non-zero device policy instead of copying/sorting every online IP each poll;
 - an external engine process whose lifecycle can be observed and replaced;
 - journald output instead of an application-owned, unbounded log file.
+
+The controller's shared heap avoids repeating one Go process per node, but the
+bounds above are applied to each independent worker where appropriate. Every
+node still has an engine process and per-node users/connections/state, so total
+memory is not constant as node count grows. No fixed RSS or completed 2/4/8-node
+soak result is claimed by this design description.
 
 The defaults target ordinary 2-4 GiB VPS nodes and remain configurable for
 larger fleets. Raising bounds increases worst-case memory use and should be
@@ -140,7 +168,8 @@ the IP.
 | `/usr/local/lib/v3node/xray` | pinned stock Xray engine |
 | `/etc/v3node/config.json` | local controller configuration |
 | `/etc/v3node/panel.token` | recommended panel token file |
-| `/var/lib/v3node` | durable generated state and rollback data |
+| `/var/lib/v3node` | singleton/legacy state retained during safe migration |
+| `/var/lib/v3node/nodes/<name>` | multi-node state, checkpoint, engine config and API secret |
 | `/run/v3node` | process-local runtime data |
 
 The service runs as the unprivileged `v3node` account. Only

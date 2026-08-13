@@ -177,7 +177,8 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", config.DefaultPath(), "destination local JSON configuration")
 	panelURL := flags.String("panel-url", "", "V2Board-compatible panel base URL")
-	nodeID := flags.Int64("node-id", 0, "positive panel node ID")
+	var nodeIDs nodeIDFlags
+	flags.Var(&nodeIDs, "node-id", "positive panel node ID; repeat for multiple nodes")
 	tokenFile := flags.String("token-file", "/etc/v3node/panel.token", "installed panel token path")
 	tokenSource := flags.String("token-source", "", "copy token from this file without exposing it in argv")
 	allowHTTP := flags.Bool("allow-insecure-http", false, "allow an HTTP panel URL")
@@ -196,8 +197,19 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	if parsed.Scheme != "https" && !(*allowHTTP && parsed.Scheme == "http") {
 		return errors.New("generate --panel-url must use HTTPS unless --allow-insecure-http is set")
 	}
-	if *nodeID <= 0 {
+	if len(nodeIDs) == 0 {
 		return errors.New("generate --node-id must be positive")
+	}
+	for _, nodeID := range nodeIDs {
+		if nodeID <= 0 {
+			return errors.New("generate --node-id must be positive")
+		}
+	}
+	if duplicate := duplicateNodeID(nodeIDs); duplicate != 0 {
+		return fmt.Errorf("generate --node-id %d was supplied more than once", duplicate)
+	}
+	if len(nodeIDs) > 16 {
+		return errors.New("generate supports at most 16 node IDs")
 	}
 	if !isAbsoluteAdminPath(*configPath) || !isAbsoluteAdminPath(*tokenFile) {
 		return errors.New("generate config and token paths must be absolute")
@@ -215,19 +227,58 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	}
 
 	generated := config.Defaults()
-	generated.Panel = config.PanelConfig{
-		URL:               strings.TrimRight(*panelURL, "/"),
-		NodeID:            *nodeID,
-		TokenFile:         *tokenFile,
-		AllowInsecureHTTP: *allowHTTP,
+	cleanPanelURL := strings.TrimRight(*panelURL, "/")
+	var document any
+	if len(nodeIDs) == 1 {
+		// Keep the original single-node document shape byte-for-byte compatible.
+		generated.Panel = config.PanelConfig{
+			URL:               cleanPanelURL,
+			NodeID:            nodeIDs[0],
+			TokenFile:         *tokenFile,
+			AllowInsecureHTTP: *allowHTTP,
+		}
+		validation := generated
+		validation.Panel.TokenFile = ""
+		validation.Panel.Token = "validation-placeholder"
+		if err := validation.Validate(); err != nil {
+			return fmt.Errorf("generated configuration is invalid: %w", err)
+		}
+		document = generated
+	} else {
+		nodes, buildErr := buildGeneratedNodes(cleanPanelURL, nodeIDs, *tokenFile, generated.Engine)
+		if buildErr != nil {
+			return fmt.Errorf("generate multi-node configuration: %w", buildErr)
+		}
+		generated.Nodes = make([]config.NodeEntry, 0, len(nodes))
+		for _, node := range nodes {
+			generated.Nodes = append(generated.Nodes, config.NodeEntry{
+				Name:        node.Name,
+				APIHost:     node.APIHost,
+				NodeID:      node.NodeID,
+				TokenFile:   node.TokenFile,
+				AllowHTTP:   node.AllowHTTP,
+				StateDir:    node.StateDir,
+				StatsListen: node.StatsListen,
+				ClashListen: node.ClashListen,
+			})
+		}
+		validation := generated
+		for index := range validation.Nodes {
+			validation.Nodes[index].TokenFile = ""
+			validation.Nodes[index].APIKey = "validation-placeholder"
+		}
+		if err := validation.Validate(); err != nil {
+			return fmt.Errorf("generated configuration is invalid: %w", err)
+		}
+		multiDocument := generatedMultiConfig{
+			Nodes:   nodes,
+			Engine:  generated.Engine,
+			Runtime: generated.Runtime,
+			Network: generated.Network,
+		}
+		document = multiDocument
 	}
-	validation := generated
-	validation.Panel.TokenFile = ""
-	validation.Panel.Token = "validation-placeholder"
-	if err := validation.Validate(); err != nil {
-		return fmt.Errorf("generated configuration is invalid: %w", err)
-	}
-	data, err := json.MarshalIndent(generated, "", "  ")
+	data, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode generated configuration: %w", err)
 	}
@@ -243,12 +294,110 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 	if err := writeAdminFiles(writes, *force, !*skipOwnership); err != nil {
 		return fmt.Errorf("commit generated files: %w", err)
 	}
-	fmt.Fprintf(stdout, "generated %s for node %d\n", *configPath, *nodeID)
+	if len(nodeIDs) == 1 {
+		fmt.Fprintf(stdout, "generated %s for node %d\n", *configPath, nodeIDs[0])
+	} else {
+		fmt.Fprintf(stdout, "generated %s for %d nodes\n", *configPath, len(nodeIDs))
+	}
 	if *tokenSource == "" {
 		fmt.Fprintf(stdout, "create %s as root:v3node mode 0640 before running check\n", *tokenFile)
 	}
 	fmt.Fprintf(stdout, "next: sudo -u v3node v3node check --config %s\n", *configPath)
 	return nil
+}
+
+type nodeIDFlags []int64
+
+func (values *nodeIDFlags) String() string {
+	if values == nil || len(*values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(*values))
+	for _, value := range *values {
+		parts = append(parts, strconv.FormatInt(value, 10))
+	}
+	return strings.Join(parts, ",")
+}
+
+func (values *nodeIDFlags) Set(value string) error {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return errors.New("node ID must be an integer")
+	}
+	*values = append(*values, parsed)
+	return nil
+}
+
+func duplicateNodeID(values []int64) int64 {
+	seen := make(map[int64]struct{}, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			return value
+		}
+		seen[value] = struct{}{}
+	}
+	return 0
+}
+
+type generatedMultiConfig struct {
+	Nodes   []generatedNode      `json:"nodes"`
+	Engine  config.EngineConfig  `json:"engine"`
+	Runtime config.RuntimeConfig `json:"runtime"`
+	Network config.NetworkConfig `json:"network"`
+}
+
+type generatedNode struct {
+	Name        string `json:"name"`
+	APIHost     string `json:"api_host"`
+	NodeID      int64  `json:"node_id"`
+	TokenFile   string `json:"token_file"`
+	AllowHTTP   bool   `json:"allow_insecure_http,omitempty"`
+	StateDir    string `json:"state_dir"`
+	StatsListen string `json:"stats_listen"`
+	ClashListen string `json:"clash_listen"`
+}
+
+func buildGeneratedNodes(panelURL string, nodeIDs []int64, tokenFile string, engine config.EngineConfig) ([]generatedNode, error) {
+	nodes := make([]generatedNode, 0, len(nodeIDs))
+	descriptors := make([]config.NodeEntry, 0, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		// A repeated --node-id list does not identify which entry, if any,
+		// owned a previous singleton checkpoint. Never guess: replaying the
+		// singleton's traffic or last-known-good state under the wrong panel
+		// node is worse than leaving that legacy state untouched.
+		node := generatedNode{
+			APIHost:   panelURL,
+			NodeID:    nodeID,
+			TokenFile: tokenFile,
+			AllowHTTP: strings.HasPrefix(strings.ToLower(panelURL), "http://"),
+		}
+		nodes = append(nodes, node)
+		descriptors = append(descriptors, config.NodeEntry{
+			Name:        node.Name,
+			APIHost:     node.APIHost,
+			NodeID:      node.NodeID,
+			APIKey:      "validation-placeholder",
+			AllowHTTP:   node.AllowHTTP,
+			StateDir:    node.StateDir,
+			StatsListen: node.StatsListen,
+			ClashListen: node.ClashListen,
+		})
+	}
+	// Resolve every derived endpoint now and persist it in the generated JSON.
+	// This makes the node-to-state mapping independent of descriptor order and
+	// of future changes to config expansion defaults.
+	isolation := config.Config{Nodes: descriptors, Engine: engine}
+	workers, err := isolation.NodeConfigs()
+	if err != nil {
+		return nil, err
+	}
+	for index := range nodes {
+		nodes[index].Name = workers[index].NodeName()
+		nodes[index].StateDir = workers[index].Engine.StateDir
+		nodes[index].StatsListen = workers[index].Engine.StatsListen
+		nodes[index].ClashListen = workers[index].Engine.ClashListen
+	}
+	return nodes, nil
 }
 
 func readTokenSource(path string) ([]byte, error) {

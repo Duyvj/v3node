@@ -32,6 +32,9 @@ func CompileState(node model.NodeConfig, users []model.User, local config.Config
 	if err := node.Validate(); err != nil {
 		return CompiledState{}, err
 	}
+	if err := ValidatePublicManagementPort(node.ServerPort, local.ProtectedManagement); err != nil {
+		return CompiledState{}, err
+	}
 	if net.ParseIP(node.ListenIP) == nil && node.ListenIP != "" {
 		return CompiledState{}, fmt.Errorf("listen_ip %q is not an IP address", node.ListenIP)
 	}
@@ -78,7 +81,7 @@ func CompileState(node model.NodeConfig, users []model.User, local config.Config
 	}
 	spec.EncryptionSettings = encryptionSettings
 
-	tls, err := compileTLS(node, local.Panel.NodeID, local.Engine.StateDir)
+	tls, err := compileTLS(node, local.Panel.NodeID, local.Engine.StateDir, local.Instance)
 	if err != nil {
 		return CompiledState{}, err
 	}
@@ -147,6 +150,28 @@ func CompileState(node model.NodeConfig, users []model.User, local config.Config
 	}, nil
 }
 
+// ValidatePublicManagementPort prevents a wildcard VPN listener from taking a
+// numeric port used by any loopback management API in the shared process.
+func ValidatePublicManagementPort(publicPort int, management []string) error {
+	if publicPort < 1 || publicPort > 65535 {
+		return errors.New("public listener port is out of range")
+	}
+	for _, address := range management {
+		_, portText, err := net.SplitHostPort(address)
+		if err != nil {
+			return fmt.Errorf("invalid protected management address %q: %w", address, err)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid protected management port in %q", address)
+		}
+		if port == publicPort {
+			return fmt.Errorf("public listener port %d conflicts with protected management address %s", publicPort, address)
+		}
+	}
+	return nil
+}
+
 // ValidateBackendPolicies rejects policy combinations that the selected stock
 // data plane cannot enforce. Limits must fail closed instead of being accepted
 // and silently ignored.
@@ -165,7 +190,7 @@ func ValidateBackendPolicies(backend string, users []engine.UserSpec) error {
 	return nil
 }
 
-func compileTLS(node model.NodeConfig, nodeID int64, stateDir string) (engine.TLSSpec, error) {
+func compileTLS(node model.NodeConfig, nodeID int64, stateDir, instance string) (engine.TLSSpec, error) {
 	settings := node.TLSSettings
 	result := engine.TLSSpec{
 		Mode:             "none",
@@ -220,14 +245,14 @@ func compileTLS(node model.NodeConfig, nodeID int64, stateDir string) (engine.TL
 			if result.ManagedSelfSigned {
 				result.CertificateFile = path.Join(stateDir, "certificates", fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
 			} else {
-				result.CertificateFile = path.Join("/etc/v3node", fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
+				result.CertificateFile = path.Join(operatorCertificateDir(instance), fmt.Sprintf("%s%d.cer", node.Protocol, nodeID))
 			}
 		}
 		if result.KeyFile == "" {
 			if result.ManagedSelfSigned {
 				result.KeyFile = path.Join(stateDir, "certificates", fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
 			} else {
-				result.KeyFile = path.Join("/etc/v3node", fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
+				result.KeyFile = path.Join(operatorCertificateDir(instance), fmt.Sprintf("%s%d.key", node.Protocol, nodeID))
 			}
 		}
 		if !isAbsoluteTargetPath(result.CertificateFile) || !isAbsoluteTargetPath(result.KeyFile) {
@@ -260,6 +285,13 @@ func compileTLS(node model.NodeConfig, nodeID int64, stateDir string) (engine.TL
 	default:
 		return engine.TLSSpec{}, fmt.Errorf("unknown TLS mode %d", node.TLS)
 	}
+}
+
+func operatorCertificateDir(instance string) string {
+	if instance == "" {
+		return "/etc/v3node"
+	}
+	return path.Join("/etc/v3node/nodes", instance)
 }
 
 func isAbsoluteTargetPath(value string) bool {

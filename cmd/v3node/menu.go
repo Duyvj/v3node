@@ -115,7 +115,7 @@ func promptGenerateArgs(stdin io.Reader, stdout io.Writer) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	nodeID, err := read("Node ID: ")
+	nodeIDs, err := read("Node IDs (comma or space separated): ")
 	if err != nil {
 		return nil, err
 	}
@@ -123,10 +123,19 @@ func promptGenerateArgs(stdin io.Reader, stdout io.Writer) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if panelURL == "" || nodeID == "" {
-		return nil, errors.New("panel URL and node ID are required")
+	if panelURL == "" || nodeIDs == "" {
+		return nil, errors.New("panel URL and at least one node ID are required")
 	}
-	args := []string{"--panel-url", panelURL, "--node-id", nodeID}
+	fields := strings.FieldsFunc(nodeIDs, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t'
+	})
+	if len(fields) == 0 {
+		return nil, errors.New("at least one node ID is required")
+	}
+	args := []string{"--panel-url", panelURL}
+	for _, nodeID := range fields {
+		args = append(args, "--node-id", nodeID)
+	}
 	if tokenSource != "" {
 		args = append(args, "--token-source", tokenSource)
 	}

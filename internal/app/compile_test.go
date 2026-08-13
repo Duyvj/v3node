@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,16 @@ func TestCompileState(t *testing.T) {
 	}
 	if compiled.PullInterval != time.Minute || compiled.PushInterval != 45*time.Second || compiled.NodeReportMinBytes != 1000 {
 		t.Fatalf("unexpected compiled state: %#v", compiled)
+	}
+}
+
+func TestCompileRejectsPublicManagementPortCollision(t *testing.T) {
+	local := config.Defaults()
+	local.ProtectedManagement = []string{"127.0.0.1:12002", "[::1]:13002"}
+	node := model.NodeConfig{Protocol: model.ProtocolVLESS, ServerPort: 12002, Network: "tcp"}
+	_, err := CompileState(node, []model.User{{ID: 1, UUID: "48e90e76-2a72-46be-ac91-45d96486977a"}}, local)
+	if err == nil || !strings.Contains(err.Error(), "conflicts with protected management") {
+		t.Fatalf("management collision error = %v", err)
 	}
 }
 
@@ -189,6 +200,23 @@ func TestCompileTLSUsesConventionalCertificatePaths(t *testing.T) {
 	}
 	if compiled.Node.TLS.CertificateFile != "/etc/v3node/trojan42.cer" || compiled.Node.TLS.KeyFile != "/etc/v3node/trojan42.key" {
 		t.Fatalf("unexpected default certificate paths: %#v", compiled.Node.TLS)
+	}
+}
+
+func TestCompileTLSNamespacesImplicitMultiNodeCertificatePaths(t *testing.T) {
+	local := config.Defaults()
+	local.Panel.NodeID = 42
+	local.Instance = "panel-a-42"
+	node := model.NodeConfig{
+		Protocol: model.ProtocolTrojan, ServerPort: 443, Network: "tcp", TLS: model.SecurityTLS,
+		TLSSettings: model.TLSSettings{CertMode: "file", ServerName: "edge.example"},
+	}
+	compiled, err := CompileState(node, []model.User{{ID: 1, UUID: "password"}}, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Node.TLS.CertificateFile != "/etc/v3node/nodes/panel-a-42/trojan42.cer" || compiled.Node.TLS.KeyFile != "/etc/v3node/nodes/panel-a-42/trojan42.key" {
+		t.Fatalf("unexpected namespaced certificate paths: %#v", compiled.Node.TLS)
 	}
 }
 

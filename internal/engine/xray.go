@@ -162,7 +162,8 @@ func (r XrayRenderer) Render(node NodeSpec, users []UserSpec, opts Options) (Ren
 	if err != nil {
 		return Rendered{}, err
 	}
-	protectedCIDRs, protectedPorts, err := protectedManagementEndpoints(opts.StatsListen, opts.ClashListen)
+	managementAddresses := append([]string{opts.StatsListen, opts.ClashListen}, opts.ProtectedManagement...)
+	protectedCIDRs, protectedPorts, err := protectedManagementEndpoints(managementAddresses...)
 	if err != nil {
 		return Rendered{}, err
 	}

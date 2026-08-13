@@ -13,26 +13,28 @@ must pass the engine's own configuration check before it can become active.
 
 ## Credentials
 
-Use `panel.token_file` rather than embedding a token in `config.json`. The
-recommended files are owned by `root:v3node`, with directory mode `0750` and
-file mode `0640`. Do not pass the token on a command line or put it in a public
-repository.
+Use `panel.token_file`, or each node entry's `token_file`, rather than embedding
+a token in `config.json`. Multiple nodes on the same panel can reference the
+same protected token file. The recommended files are owned by `root:v3node`,
+with directory mode `0750` and file mode `0640`. Do not pass the token on a
+command line or put it in a public repository.
 
 The legacy-compatible panel API requires the token as a query parameter. This
 means HTTPS is mandatory in production and every error/log path must redact the
 query string. `allow_insecure_http` exists only for isolated development
 networks and defaults to false.
 
-The sing-box Connections API has a separate random 256-bit bearer secret in
-`/var/lib/v3node/api.secret` (mode `0600`). The controller creates it from the
+Each sing-box Connections API has a separate random 256-bit bearer secret in
+its node state directory (the singleton/legacy path is
+`/var/lib/v3node/api.secret`, mode `0600`). The controller creates it from the
 OS random source on first check/run, persists it across generations, and sends
 it as a bearer credential for Connections reads and closes. It is not the panel
-token and must not be copied into panel configuration. Connections JSON is
-stream-decoded under byte and item limits rather than decoded into an
-unbounded generic object tree.
+token, is not shared with another node, and must not be copied into panel
+configuration. Connections JSON is stream-decoded under byte and item limits
+rather than decoded into an unbounded generic object tree.
 
-Both engines install early rules which reject ordinary VPN-user routes to the
-configured Stats/Connections loopback addresses and ports, even if
+Both engines install early rules which reject ordinary VPN-user routes to all
+configured nodes' Stats/Connections loopback addresses and ports, even if
 `network.block_private` is disabled. Xray's unauthenticated Stats gRPC listener
 therefore remains reachable only from the local service boundary under the
 default direct/block/DNS routing policy. A panel-supplied custom Xray outbound
@@ -89,6 +91,17 @@ are limited to systemd-managed state and runtime directories.
 The unit deliberately does not set `MemoryMax`. It enables accounting and
 relies on bounded controller structures so normal concurrency is not killed by
 a rigid cap. Operators can add a site-specific drop-in after load testing.
+
+Multi-node mode intentionally uses one service/controller process but a
+separate controller state and engine process for each node. Node names, state
+directories, management ports and panel identities must be unique, and the
+controller rejects equal numeric public listener ports even across TCP and UDP.
+Traffic checkpoints and online/device inventories stay within their node
+worker. The panel `alive` response remains the eventual cross-node baseline;
+it is trusted control-plane accounting, not an instantaneous shared admission
+primitive. Additional nodes add engine processes and memory exposure, so
+operators must measure their own node/protocol/session mix rather than assume a
+fixed multi-node RAM footprint.
 
 ## Host changes
 

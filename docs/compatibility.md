@@ -38,6 +38,18 @@ The per-user device policy always comes from the panel's `device_limit` field;
 replaces the panel value. The default ceiling is 1,024 IPs per user, allocated
 lazily under the separate global online-IP bound.
 
+The legacy singleton `{ "panel": ... }` configuration remains supported. A
+multi-node installation instead uses up to 16 `nodes` entries. Native names
+are `api_host`, `node_id`, `token_file`, and `timeout`; the parser also accepts
+the original v2node spellings `ApiHost`, `NodeID`, `ApiKey`, and `Timeout`.
+Installer/generator use of repeated `--node-id` is preferred because it writes
+stable, non-overlapping state and loopback management endpoints from the
+canonical panel identity plus NodeID automatically.
+Legacy runtime metadata that predates persisted listener identity is not
+started as last-known-good inside a multi-node process; the worker waits for a
+fresh panel synchronization so it can reserve the correct public port first.
+The singleton upgrade path keeps its version-2 last-known-good behavior.
+
 ## Protocol and engine matrix
 
 | Protocol | sing-box 1.13.18 project build | Stock Xray 26.3.27 |
@@ -70,10 +82,11 @@ semantics.
 
 TLS `file` certificates are operator-managed. When the panel omits `cert_file`
 and `key_file`, the controller uses `/etc/v3node/<protocol><node-id>.cer` and
-`.key`; both files must already exist and be readable by the `v3node` service
-account. `cert_mode=self` creates a private ECDSA pair below
-`/var/lib/v3node/certificates` as a bounded reconciliation step. `dns` and
-`http` remain explicitly rejected because this controller does not ingest
+`.key` for a singleton, or the node's `/etc/v3node/nodes/<name>/` directory in
+multi-node mode; both files must already exist and be readable by the `v3node`
+service account. `cert_mode=self` creates a private ECDSA pair below that node's
+state-directory `certificates/` subdirectory as a bounded reconciliation step.
+`dns` and `http` remain explicitly rejected because this controller does not ingest
 DNS-provider secrets or keep an ACME client resident. `tls=1` with an empty or
 `none` certificate mode means external TLS termination, matching the original
 panel contract. Reality does not use certificate files.
@@ -143,6 +156,18 @@ equivalent source-IP/user hook, so an Xray generation
 containing a non-zero `device_limit` also fails validation. These are explicit
 compatibility boundaries, not claims that unsupported limits were applied.
 
-This beta manages one panel/node per controller process. The original
-multi-node array contract is not yet implemented; operators must not point two
-service instances at the same state directory or management ports.
+Multi-node mode keeps one systemd service and one Go controller process, but
+creates an isolated panel client, controller, engine process, state directory,
+traffic checkpoint, API secret, Stats endpoint, and Connections endpoint for
+each node. Equal user IDs on different nodes therefore do not merge local
+traffic or device state. Device limits across nodes still use the panel
+`alive` aggregate as an eventual baseline; they are not a synchronous global
+admission lock.
+
+Every node's public VPN listener port comes from its panel response. All nodes
+on the VPS must use different numeric ports, including TCP versus UDP; startup
+validation also rejects a public port matching any node's internal management
+port. The per-node engine model preserves panel
+semantics but consumes engine memory for every node, so multi-node RSS depends
+on node count and workload. Long-running 2/4/8-node load and accounting soak
+remain release gates rather than completed compatibility claims.
