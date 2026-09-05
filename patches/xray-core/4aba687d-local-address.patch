@@ -1,0 +1,81 @@
+diff --git a/transport/internet/grpc/encoding/hunkconn.go b/transport/internet/grpc/encoding/hunkconn.go
+index 92769065..18262fb9 100644
+--- a/transport/internet/grpc/encoding/hunkconn.go
++++ b/transport/internet/grpc/encoding/hunkconn.go
+@@ -38,12 +38,14 @@ func NewHunkReadWriter(hc HunkConn, cancel context.CancelFunc) *HunkReaderWriter
+ 
+ func NewHunkConn(hc HunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
+ 	rAddr := remoteAddrFromContext(hc.Context(), trustedXForwardedFor)
++	lAddr := localAddrFromContext(hc.Context())
+ 	wrc := NewHunkReadWriter(hc, cancel)
+ 	return cnc.NewConnection(
+ 		cnc.ConnectionInput(wrc),
+ 		cnc.ConnectionOutput(wrc),
+ 		cnc.ConnectionOnClose(wrc),
+ 		cnc.ConnectionRemoteAddr(rAddr),
++		cnc.ConnectionLocalAddr(lAddr),
+ 	)
+ }
+ 
+diff --git a/transport/internet/grpc/encoding/multiconn.go b/transport/internet/grpc/encoding/multiconn.go
+index f27a1c35..5a51c929 100644
+--- a/transport/internet/grpc/encoding/multiconn.go
++++ b/transport/internet/grpc/encoding/multiconn.go
+@@ -33,12 +33,14 @@ func NewMultiHunkReadWriter(hc MultiHunkConn, cancel context.CancelFunc) *MultiH
+ 
+ func NewMultiHunkConn(hc MultiHunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
+ 	rAddr := remoteAddrFromContext(hc.Context(), trustedXForwardedFor)
++	lAddr := localAddrFromContext(hc.Context())
+ 	wrc := NewMultiHunkReadWriter(hc, cancel)
+ 	return cnc.NewConnection(
+ 		cnc.ConnectionInputMulti(wrc),
+ 		cnc.ConnectionOutputMulti(wrc),
+ 		cnc.ConnectionOnClose(wrc),
+ 		cnc.ConnectionRemoteAddr(rAddr),
++		cnc.ConnectionLocalAddr(lAddr),
+ 	)
+ }
+ 
+diff --git a/transport/internet/grpc/encoding/remoteaddr.go b/transport/internet/grpc/encoding/remoteaddr.go
+index a28d9193..5c71f750 100644
+--- a/transport/internet/grpc/encoding/remoteaddr.go
++++ b/transport/internet/grpc/encoding/remoteaddr.go
+@@ -56,3 +56,17 @@ func parseTrustedXForwardedFor(md metadata.MD, trusted []string, remoteAddr net.
+ 	}
+ 	return nil
+ }
++
++func localAddrFromContext(ctx context.Context) net.Addr {
++	var localAddr net.Addr
++	if pr, ok := peer.FromContext(ctx); ok {
++		localAddr = pr.LocalAddr
++	}
++	if localAddr == nil {
++		localAddr = &net.TCPAddr{
++			IP:   []byte{0, 0, 0, 0},
++			Port: 0,
++		}
++	}
++	return localAddr
++}
+diff --git a/transport/internet/splithttp/hub.go b/transport/internet/splithttp/hub.go
+index 557f8a54..d664c86c 100644
+--- a/transport/internet/splithttp/hub.go
++++ b/transport/internet/splithttp/hub.go
+@@ -373,11 +373,15 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
+ 			Reader:         request.Body,
+ 			ResponseWriter: writer,
+ 		}
++		localAddr := h.localAddr
++		if la, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
++			localAddr = la
++		}
+ 		conn := splitConn{
+ 			writer:     httpSC,
+ 			reader:     httpSC,
+ 			remoteAddr: remoteAddr,
+-			localAddr:  h.localAddr,
++			localAddr:  localAddr,
+ 		}
+ 		if sessionId != "" { // if not stream-one
+ 			conn.reader = currentSession.uploadQueue
