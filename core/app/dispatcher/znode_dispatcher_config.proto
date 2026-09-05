@@ -1,0 +1,15 @@
+﻿syntax = "proto3";
+
+package znode.core.app.dispatcher;
+option csharp_namespace = "Znode.core.app.dispatcher";
+option go_package = "github.com/Duyvj/v3node/core/app/dispatcher";
+option java_package = "com.znode.core.app.dispatcher";
+option java_multiple_files = true;
+
+message SessionConfig {
+  reserved 1;
+}
+
+message Config {
+  SessionConfig settings = 1;
+}
